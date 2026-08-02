@@ -1,0 +1,7 @@
+*.pyc
+blender_dev_env/*
+__pycache__/*
+snapshots/*
+proxychains.conf
+tools/
+REF/snapshot.py
