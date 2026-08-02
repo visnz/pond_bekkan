@@ -1,13 +1,13 @@
 # PondBekkan —— 池塘 × 别馆 合并插件
 # 逻辑层（core）一套代码共同维护；UI 层（ui）两套皮肤：
-#   蛙灾模式 = 池塘四抽屉（岁岁）  别馆模式 = 别馆工具箱（visn）
+#   蛙灾模式 = 池塘四抽屉（岁岁）  别馆模式 = 别馆工具箱（桶桶）
 # 发行三版本（build.py 产出，改 _build_mode.py 与 bl_info 名称）：
 #   合体版 pond_bekkan（偏好设置里切换模式，默认蛙灾）
 #   蛙灾独立版 Pond ／ 别馆独立版 bekkan_visn（无开关，打开即原 UI）
 bl_info = {
     "name": "PondBekkan",
     "category": "3D View",
-    "author": "visnz & 岁岁",
+    "author": "岁岁 & 桶桶",
     "blender": (5, 2, 0),  # 仅支持 Blender 5.2
     "location": "View3D > Sidebar（N 面板）",
     "description": "池塘与别馆的合并工具箱：一套核心，两套界面",
