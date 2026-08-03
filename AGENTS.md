@@ -84,7 +84,7 @@ bl_info 的 name。
 - **跨版本防御**：属性访问用 `getattr/hasattr` 兜底；图标用前先查合法枚举
   （参考 `ui/bekkan/analyzer_panel.py` 的 `_icon()`）。目标版本只有 5.2，
   但防御性写法是两项目的共同传统，保留。
-- **忠实平移**：合并进来的模块保持原实现与原作者的注释风格（岁岁的口语化
+- **忠实平移**：合并进来的模块保持原实现与原作者的注释风格（蛙灾的口语化
   注释是她的项目文化，不要「润色」掉）。修 bug 走单独 PR，不混进结构调整。
 - **快照交互**：当前统一 Bekkan 行为（快照在线左、Alt+右键拖）；Pond 的
   点线拖交互以注释形式保留在 `core/snapshot.py` 末尾（决策点 5），
@@ -104,3 +104,73 @@ bl_info 的 name。
 以 `开发计划/合并对照清单.md` 第 5 节为准（快照交互待议、四元数迁移、
 窗口缩放跟随、预设库路径可配化等）。**合并重组阶段不修 bug**；
 之后的修复请按清单逐条销号。
+
+---
+
+## 协作开发规则（AI 必须遵守）
+
+> 本项目由「蛙灾（Pond）」与「桶桶（Bekkan）」共同维护。
+> 原则是：**底层核心共用，顶层 UI 各自独立；能不碰对方模块就不碰，必须碰时先说明、获同意。**
+
+### 1. 模块所有权与修改边界
+
+- **Pond 专属**：`core/bakemap.py`、`core/c4d_bridge.py`、`core/lightdesk.py`、
+  `core/lumen.py`、`core/organize.py`、`core/palette.py`、`core/preset_lib.py`、
+  `core/renderlayers.py`、`core/sixproj.py`、`core/splitter.py`、
+  `core/synccheck.py`、`core/trace2solid.py`、`core/version.py`，以及
+  `ui/pond/` 下全部文件。**修改前原则上应优先由蛙灾确认。**
+- **Bekkan 专属**：`core/anime.py`、`core/render_preset.py`、`core/texture.py`、
+  `core/addonmanager/`、`core/analyzer/`，以及 `ui/bekkan/panels.py`、
+  `ui/bekkan/analyzer_panel.py`、`ui/bekkan/addonmanager_panel.py`。
+  **修改前原则上应优先由桶桶确认。**
+- **共同维护（Mixed）**：`core/hierarchy.py`、`core/stage.py`、`core/snapshot.py`、
+  `__init__.py`、`prefs.py`、`ui/__init__.py`、`ui/bekkan/__init__.py`。
+  这些文件同时包含双方代码或已被重写为共同资产，**任何改动都必须在方案阶段讲清楚影响范围，并获得当前用户明确同意。**
+
+### 2. AI 修改前必须做的方案说明
+
+当 AI 计划修改**对方专属模块**或**共同维护模块**时，必须在动手前向当前用户说明：
+
+1. 要改哪个文件/函数；
+2. 这个模块原来的归属（Pond / Bekkan / Mixed）；
+3. 修改理由；
+4. 是否会影响另一模式的 UI 或行为；
+5. 是否需要同步更新 `开发计划/模块归属标注.md` 中的共同维护清单。
+
+**未获得当前用户明确同意前，不得直接修改对方专属模块。**
+
+### 3. 每次开发必须留档
+
+每次 AI vibecoding 后，必须在 `开发计划/` 下新增或追加开发日志，记录：
+
+- 本次目标与范围；
+- 修改了哪些文件/函数；
+- 调试与试错过程；
+- 测试结果；
+- 未完成的 TODO。
+
+日志命名建议：`开发计划/YYYY-MM-DD_开发主题.md`。
+已有 `snapshot_debug_report.md` 即此类文档的示例。
+
+### 4. 共同维护模块索引
+
+以下模块为双方共用，修改后必须同步更新 `开发计划/模块归属标注.md` 中的「共同维护清单」：
+
+| 文件 | 涉及双方内容 | 主要维护者 | 关键注意点 |
+|---|---|---|---|
+| `core/hierarchy.py` | Pond 6 op + Bekkan 7 op + 共享助手 | 蛙灾/桶桶共同 | Pond 侧 6 op 多数概念 fork 自 Bekkan，但实现已改（详见 `开发计划/模块归属标注.md`） |
+| `core/stage.py` | Bekkan 摄像机组/开文件夹 + Pond 简洁机组 | 蛙灾/桶桶共同 | 中心约束灯光、C-P/C-SP-ZT 机组来自 Bekkan；Pond 侧 `POND_OT_cam_rig_build` 为独立实现 |
+| `core/snapshot.py` | Bekkan 核心 + Pond 删除/导出/清理逻辑 | **桶桶** | 蛙灾已放权修改；改 GPU/交互前先读调试报告 |
+| `__init__.py` | 注册中心 | 共同 | 注册顺序影响模式切换与面板恢复 |
+| `prefs.py` | 唯一 AddonPreferences | 共同 | 同时影响模式开关、模块开关、颈椎拯救者设置 |
+| `ui/__init__.py` | 模式分发 | 共同 | 改切换逻辑需实测合体版与独立版 |
+| `ui/bekkan/__init__.py` | 别馆注册/注销 | 共同 | addonmanager 注册与面板恢复顺序不能乱 |
+
+> 注：`core/hierarchy.py` 与 `core/stage.py` 中部分 Pond op 在概念上源自 Bekkan（如 `P2E`、`SoloPick`、`RAQtoSubparent`、中心约束灯光、摄像机组），但实现已被蛙灾改写。若后续发现功能可被 Bekkan 原版覆盖，需在开发计划中记录评估结果后再合并。
+
+新增或移出共同维护模块时，必须同时更新本索引和 `开发计划/模块归属标注.md`。
+
+### 5. 原始归属速查
+
+完整模块归属与函数级标注见 `开发计划/模块归属标注.md`，
+自动生成相似度报告见 `tools/analyze_origin_report.md`。
