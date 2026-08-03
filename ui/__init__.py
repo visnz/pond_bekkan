@@ -5,6 +5,7 @@ import bpy
 from .. import _build_mode
 from . import bekkan as _bekkan
 from . import pond as _pond
+from . import mode_switcher as _mode_switcher
 
 _active = None  # "POND" / "BEKKAN" / None
 
@@ -45,8 +46,9 @@ def current_mode():
 
 
 def register(mode=None):
-    """注册指定模式的 UI；已在另一模式时先切换"""
+    """注册指定模式的 UI；mode_switcher 全局只注册一次"""
     global _active
+    _mode_switcher.register()
     if mode is None:
         mode = default_mode()
     if _active == mode:
@@ -62,6 +64,7 @@ def unregister():
     if _active is not None:
         _unregister_one(_active)
         _active = None
+    _mode_switcher.unregister()
 
 
 def apply_mode(mode):

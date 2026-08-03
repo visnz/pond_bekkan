@@ -3,6 +3,7 @@
 import bpy
 
 from ...core.snapshot import disp_snap, _aid
+from .prefs import module_enabled
 
 
 class BEKKAN_UL_snap_list(bpy.types.UIList):
@@ -15,6 +16,10 @@ class SnapPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "别馆"
+
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_snapshot")
 
     def draw(self, context):
         layout = self.layout

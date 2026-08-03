@@ -6,6 +6,7 @@ from bpy.types import Panel, UIList
 from bpy.app.handlers import persistent
 
 from ...core.addonmanager import common
+from .prefs import module_enabled
 
 _ROOT_PKG = __package__.split(".")[0]
 
@@ -76,6 +77,8 @@ class ADDONMANAGER_PT_main(Panel):
 
     @classmethod
     def poll(cls, context):
+        if not module_enabled("show_addonmanager"):
+            return False
         return context.space_data.type == 'VIEW_3D'
 
     def draw(self, context):

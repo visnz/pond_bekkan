@@ -3,6 +3,8 @@
 # pond.select_parents（语义等价，见 合并对照清单.md 第 4 节）。
 import bpy
 
+from .prefs import module_enabled
+
 
 class BekkanPanelBase:
     """所有面板共用：3D视图 N 面板「别馆」页，默认折叠"""
@@ -15,6 +17,10 @@ class BekkanPanelBase:
 class VIEW3D_PT_parents_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_parents_visn"
     bl_label = "👪 上下级"
+
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_parents")
 
     def draw(self, context):
         col = self.layout.column(align=True)
@@ -32,6 +38,10 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_stage_visn"
     bl_label = "🏗 搭建类"
 
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_stage")
+
     def draw(self, context):
         col = self.layout.column(align=True)
         col.operator("object.fast_camera_visn", icon='CAMERA_DATA')
@@ -43,6 +53,10 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_texture_visn"
     bl_label = "🖼 贴图索引"
+
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_texture")
 
     def draw(self, context):
         layout = self.layout
@@ -59,6 +73,10 @@ class VIEW3D_PT_anime_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_anime_visn"
     bl_label = "🎞 动画类"
 
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_anime")
+
     def draw(self, context):
         col = self.layout.column(align=True)
         col.operator("object.add_noise_anim", text="Wiggle（添加/更新Noise）", icon='MOD_NOISE')
@@ -68,6 +86,10 @@ class VIEW3D_PT_anime_visn(BekkanPanelBase, bpy.types.Panel):
 class VIEW3D_PT_render_preset_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_render_preset_visn"
     bl_label = "🎬 渲染预设"
+
+    @classmethod
+    def poll(cls, context):
+        return module_enabled("show_render_preset")
 
     def draw(self, context):
         layout = self.layout

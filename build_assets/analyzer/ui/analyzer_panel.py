@@ -1,9 +1,9 @@
-# 别馆模式 · 工程分析面板 + 内置表格（迁移自 Bekkan/STOOL_part/Analyzer/ui.py）
-# 属性组与操作符在 core/analyzer/。
+# 独立工程分析插件 · 面板
+# 逻辑取自 PondBekkan 的 core/analyzer 与 ui/bekkan/analyzer_panel.py，
+# 仅把 N 面板分类改为「工程分析」并去掉模块开关 poll。
 import bpy
 
 from ...core.analyzer import model, state
-from .prefs import module_enabled
 
 # 影响程度 → 排序基准（严重在前）
 _IMPACT_RANK = {model.IMPACT_SEVERE: 0, model.IMPACT_HIGH: 1,
@@ -123,14 +123,9 @@ class ANALYZER_UL_finding(bpy.types.UIList):
 class VIEW3D_PT_analyze_visn(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = '别馆'
+    bl_category = '工程分析'
     bl_idname = "VIEW3D_PT_analyze_visn"
     bl_label = "📋 工程分析"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    @classmethod
-    def poll(cls, context):
-        return module_enabled("show_analyzer")
 
     def draw(self, context):
         layout = self.layout
@@ -277,7 +272,7 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
 
 
 _classes = (
-    ANALYZER_UL_finding,    # 先于面板（template_list 按类名查找）
+    ANALYZER_UL_finding,
     VIEW3D_PT_analyze_visn,
 )
 

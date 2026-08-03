@@ -1,5 +1,7 @@
 # 合并后的唯一 AddonPreferences（一个插件包只能有一个偏好类）
-# 内含：界面模式切换（仅合体版显示）+ 蛙灾 16 模块开关 + 颈椎拯救者设置。
+# 内含：界面模式切换（仅合体版显示）+ 蛙灾 16 模块开关 + 别馆 8 模块开关。
+# AddonManager（颈椎拯救者）的偏好字段仍保留在类中，但不在面板显示，
+# 以维持旧版偏好继承与核心运行；默认值已写死。
 # bl_idname = __package__：合体版=pond_bekkan，独立版=Pond / bekkan_visn，
 # 独立版用户原来的偏好设置（模块开关/收藏类别）因此可以继承。
 import bpy
@@ -8,21 +10,58 @@ from bpy.props import (BoolProperty, StringProperty, EnumProperty,
                        CollectionProperty, IntProperty)
 
 from . import _build_mode
-from .ui.pond.prefs import MODULES
+from .ui.pond.prefs import MODULES as POND_MODULES
+from .ui.bekkan.prefs import MODULES as BEKKAN_MODULES
+
+
+def _switch_sidebar_category(mode):
+    """把当前所有 3D Viewport 的 N 面板切到对应 category 并打开面板。"""
+    screen = bpy.context.screen
+    if not screen:
+        return
+    category = "池塘" if mode == "POND" else "别馆"
+    for area in screen.areas:
+        if area.type != 'VIEW_3D':
+            continue
+        space = area.spaces.active
+        if not space or space.type != 'VIEW_3D':
+            continue
+        # 确保 N 面板打开
+        space.show_region_ui = True
+        for region in area.regions:
+            if region.type == 'UI':
+                try:
+                    region.active_panel_category = category
+                    region.tag_redraw()
+                except Exception:
+                    pass
+                break
 
 
 def _on_mode_update(self, context):
-    """合体版：切换蛙灾/别馆 UI"""
+    """合体版：切换蛙灾/别馆 UI。
+
+    通过 bpy.app.timers 把真正的 UI 重建推迟到下一帧，
+    避免在 operator 执行或面板绘制过程中 unregister/register 类导致崩溃；
+    重建完成后把 3D Viewport 的 N 面板切到对应 category。
+    """
     if _build_mode.BUILD_MODE != "combined":
         return
-    try:
-        from . import ui
-        ui.apply_mode(self.mode)
-    except Exception as e:
-        print(f"[pond_bekkan] 模式切换失败: {e}")
+
+    def _apply_mode():
+        try:
+            from . import ui
+            ui.apply_mode(self.mode)
+            _switch_sidebar_category(self.mode)
+        except Exception as e:
+            print(f"[pond_bekkan] 模式切换失败: {e}")
+        return None
+
+    bpy.app.timers.register(_apply_mode, first_interval=0.01)
 
 
 # 颈椎拯救者的类别排除项（原 AddonManager/preferences.py 的 ADDONMANAGER_CategoryExcludeItem）
+# 保留在偏好类中以供核心读取；UI 已删除，默认值写死。
 class ADDONMANAGER_CategoryExcludeItem(PropertyGroup):
     name: StringProperty(name="Category Name")
     exclude: BoolProperty(
@@ -48,6 +87,7 @@ class PondBekkanPreferences(AddonPreferences):
     )
 
     # ── 颈椎拯救者设置（原 AddonManager/preferences.py 字段） ──
+    # 这些字段不再显示在偏好面板中，默认值即写死配置。
     favorite_categories: StringProperty(
         name="收藏的类别",
         description="收藏的类别列表，用逗号分隔",
@@ -59,12 +99,12 @@ class PondBekkanPreferences(AddonPreferences):
         default=True
     )
     auto_restore_on_new_file: BoolProperty(
-        name="打开新文件时自动恢复面板（建议保持默认）",
+        name="打开新文件时自动恢复面板",
         description="打开新文件时自动将面板恢复到原始类别",
         default=True
     )
     excluded_categories: StringProperty(
-        name="默认排除的类别（不建议修改）",
+        name="默认排除的类别",
         description="始终排除的基础类别，用逗号分隔",
         default="Item,Tool,View,Create,Relations,Edit,Physics,Grease Pencil"
     )
@@ -100,89 +140,36 @@ class PondBekkanPreferences(AddonPreferences):
             if self.mode == "POND":
                 self._draw_pond_toggles(layout)
             else:
-                self._draw_addonmanager(layout)
+                self._draw_bekkan_toggles(layout)
         elif bm == "pond":
             self._draw_pond_toggles(layout)
         else:
-            self._draw_addonmanager(layout)
+            self._draw_bekkan_toggles(layout)
 
     def _draw_pond_toggles(self, layout):
         box = layout.box()
         box.label(text="池塘模块开关（关掉的模块不在「池塘」页显示）", icon='PREFERENCES')
         grid = box.grid_flow(row_major=True, columns=4, even_columns=True,
                              even_rows=True, align=True)
-        for key, label in MODULES:
+        for key, label in POND_MODULES:
             grid.prop(self, key, text=label, toggle=True)
 
-    def _draw_addonmanager(self, layout):
-        # 颈椎拯救者设置（原 AddonManager 偏好面板内容）
+    def _draw_bekkan_toggles(self, layout):
         box = layout.box()
-        box.label(text="颈椎拯救者 · 使用须知", icon='ERROR')
-        box.label(text="1. 本插件会改变N面板上插件的显示顺序")
-        box.label(text="2. 被管理的插件在使用时会在原N面板位置会被隐藏")
-        box.label(text="介意勿用！", icon='INFO')
-
-        layout.separator()
-
-        box = layout.box()
-        box.label(text="自动恢复设置:", icon='RECOVER_LAST')
-        box.prop(self, "auto_restore_on_new_file")
-        layout.separator()
-
-        box = layout.box()
-        box.label(text="类别排除设置:", icon='FILTER')
-
-        box.prop(self, "excluded_categories")
-        box.label(text="默认排除类别 (英文逗号分隔，不建议修改)", icon='INFO')
-
-        row = box.row()
-        row.operator("addonmanager.scan_available_categories",
-                     text="扫描可用类别", icon='FILE_REFRESH')
-        row.label(text="初始化或插件更新后请点击", icon='ERROR')
-        row = box.row()
-        row.prop(self, "show_category_list",
-                 icon='TRIA_DOWN' if self.show_category_list else 'TRIA_RIGHT',
-                 text="其他可排除类别" if not self.show_category_list else "其他可排除类别 (点击折叠)")
-
-        if self.show_category_list:
-            row.prop(self, "columns_count", text="列数")
-
-        if self.show_category_list and len(self.available_categories) > 0:
-            total_items = len(self.available_categories)
-            items_per_column = max(1, total_items // self.columns_count + (1 if total_items % self.columns_count else 0))
-
-            box.label(text="点击选择要额外排除的类别:")
-            row = box.row()
-
-            default_excluded = [cat.strip() for cat in self.excluded_categories.split(',') if cat.strip()]
-
-            for col_idx in range(self.columns_count):
-                if col_idx * items_per_column >= total_items:
-                    break
-                col = row.column()
-                for i in range(items_per_column):
-                    item_idx = col_idx * items_per_column + i
-                    if item_idx < total_items:
-                        item = self.available_categories[item_idx]
-                        if item.name not in default_excluded:
-                            item_row = col.row()
-                            item_row.prop(item, "exclude", text=item.name)
-
-            row = box.row()
-            row.operator("addonmanager.apply_excluded_categories",
-                         text="应用排除设置", icon='CHECKMARK')
-        elif self.show_category_list:
-            box.label(text="请先扫描可用类别", icon='INFO')
-
-        box = layout.box()
-        box.label(text="收藏设置", icon='SOLO_ON')
-        box.prop(self, "favorite_categories")
-        box.label(text="收藏类别 (英文逗号分隔)", icon='INFO')
+        box.label(text="别馆模块开关（关掉的模块不在「别馆」页显示）", icon='PREFERENCES')
+        grid = box.grid_flow(row_major=True, columns=4, even_columns=True,
+                             even_rows=True, align=True)
+        for key, label in BEKKAN_MODULES:
+            grid.prop(self, key, text=label, toggle=True)
 
 
-# 蛙灾 16 个模块开关：名单只维护一份（ui/pond/prefs.py 的 MODULES），
+# 蛙灾/别馆模块开关：名单只维护一份（ui/pond/prefs.py / ui/bekkan/prefs.py 的 MODULES），
 # 动态挂到偏好类上（与原 PondPreferences 相同的手法）
-for _key, _label in MODULES:
+for _key, _label in POND_MODULES:
+    PondBekkanPreferences.__annotations__[_key] = BoolProperty(
+        name=_label, default=True)
+
+for _key, _label in BEKKAN_MODULES:
     PondBekkanPreferences.__annotations__[_key] = BoolProperty(
         name=_label, default=True)
 
