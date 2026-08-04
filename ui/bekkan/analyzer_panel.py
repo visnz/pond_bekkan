@@ -361,7 +361,7 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
             op.option = "merge"
         elif item.key == "STRUCT.merge_same_material":
             op = layout.operator("analyzer.fix_visn",
-                                 text="合并同材质对象（Ctrl+J）", icon='JOIN')
+                                 text="合并同材质对象（Ctrl+J）", icon=_icon('JOIN'))
             op.key = item.key
             op.option = "merge_objs"
         elif item.key == "STRUCT.identical_duplicates":

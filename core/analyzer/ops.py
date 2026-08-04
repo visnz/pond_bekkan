@@ -69,6 +69,19 @@ def _rerun_analysis(context):
     return results
 
 
+def _int_option(self, default):
+    """从 self.option 安全读整数；空字符串 / 非数字回退默认值。
+
+    MAT.big_textures / GEOM.subdivision_high 两个修复分支靠 option 传尺寸/级数，
+    正常 GUI 按钮都会带 option，但防止某些入口（如重做面板手工调用）漏传时
+    int('') 抛 ValueError 被外层 except 吞成「修复失败」。
+    """
+    try:
+        return int(self.option) if self.option else default
+    except (TypeError, ValueError):
+        return default
+
+
 class ANALYZER_OT_run(bpy.types.Operator):
     bl_idname = "analyzer.run_visn"
     bl_label = "运行工程分析"
@@ -215,7 +228,7 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                     msg += f"（其中 {info['made_single']} 个先复制为单用户）"
                 self.report({'INFO'}, msg)
             elif item.key == "MAT.big_textures":
-                max_size = int(self.option)
+                max_size = _int_option(self, 2048)
                 fixed, skipped, info = fixes.fix_clamp_textures(context, item, max_size)
                 if skipped and info.get("reason"):
                     self.report({'WARNING'}, info["reason"])
@@ -227,7 +240,7 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                 fixed, skipped, info = fixes.fix_normal_map_colorspace(context, item)
                 self.report({'INFO'}, f"已把 {fixed} 张贴图的色彩空间改成 Non-Color")
             elif item.key == "GEOM.subdivision_high":
-                max_level = int(self.option)
+                max_level = _int_option(self, 2)
                 fixed, skipped, info = fixes.fix_cap_subdivision(context, item, max_level)
                 if skipped and info.get("reason"):
                     self.report({'WARNING'}, info["reason"])

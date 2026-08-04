@@ -25,6 +25,8 @@ blender --background --python tools/test_analyzer.py   # 工程分析回归（�
 - 热重载：Blender 里禁用/启用插件或 `F8`，根 [__init__.py](__init__.py) 会倒序 reload 全部子模块。
 - GUI 实测清单见 AGENTS.md「开发工作流」末尾。
 - `tools/check_render_attrs.py` 是 Blender 脚本编辑器内运行的诊断脚本（非 CLI）。
+- 本机 `blender` 不在 PATH：回归命令用全路径，如
+  `"d:/SteamLibrary/steamapps/common/Blender/blender.exe" --background --python tools/test_analyzer.py`。
 
 ## 架构要点（读多文件才能拼出的全貌）
 
@@ -73,7 +75,7 @@ blender --background --python tools/test_analyzer.py   # 工程分析回归（�
   [ui/bekkan/analyzer_panel.py](ui/bekkan/analyzer_panel.py) 只随别馆模式注册。
 - 架构：[model.py](core/analyzer/model.py) 数据结构/评级常量 →
   [state.py](core/analyzer/state.py) ✓/× 标记 JSON 持久化 →
-  [checks.py](core/analyzer/checks.py) 25 简单检查 + 7 深度检查（`run_quick`/`run_deep`）→
+  [checks.py](core/analyzer/checks.py) 28 简单检查 + 8 深度检查（`run_quick`/`run_deep`）→
   [fixes.py](core/analyzer/fixes.py) 快速修复 → [ops.py](core/analyzer/ops.py) 操作符 →
   [props.py](core/analyzer/props.py) PropertyGroup。
 - 关键防御：判断渲染引擎**只看 `scene.render.engine`**（`checks._engine()`），

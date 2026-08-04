@@ -163,17 +163,61 @@ def _dense_collection_rows(context):
     return flagged, max_depth
 
 
+def _instance_stats(context):
+    """遍历当前 evaluated depsgraph，统计「真实对象数」与「含实例对象数」两个口径。
+
+    返回 (real, inst, per_source, total_eval)：
+      real        非实例条目数（当前场景真实对象，不含虚拟实例）
+      inst        实例条目数（几何节点/集合实例生成的虚拟实例）
+      per_source  按 inst.parent.original.name 归堆的实例数（定位"元凶"）
+      total_eval  real + inst ≈ Blender 视口统计的 Objects 数
+
+    几何节点/集合实例生成的对象在 depsgraph 里是虚拟实例，不在 bpy.data.objects、
+    也不在 scene.objects 里——只数真实对象会严重低估实际渲染/导出负载。
+    遍历成本 O(实例数)，交互场景下 depsgraph 通常已求值，直接复用不重算。
+    """
+    try:
+        depsgraph = context.evaluated_depsgraph_get()
+    except Exception:
+        return 0, 0, Counter(), 0
+    real = inst = 0
+    per_source = Counter()
+    for it in depsgraph.object_instances:
+        if not getattr(it, 'is_instance', False):
+            real += 1
+            continue
+        inst += 1
+        parent = getattr(it, 'parent', None)
+        if parent is None:
+            continue
+        original = getattr(parent, 'original', parent)
+        name = getattr(original, 'name', None)
+        if name:
+            per_source[name] += 1
+    return real, inst, per_source, real + inst
+
+
 def check_object_count(context):
-    """场景对象数量过多：总数 + 具体哪些集合堆得多是同一件事，合成一条 Finding。"""
+    """场景对象数量过多：总数 + 哪些集合堆得多 + 实例放大，合成一条 Finding。
+
+    两个统计口径都报：
+      · 口径一（真实对象）：len(bpy.data.objects)，原有口径
+      · 口径二（含实例，同 Blender 视口统计）：evaluated depsgraph 总条目数，
+        几何节点/集合实例生成的虚拟实例也计入
+    几何节点产生巨量虚拟实例时（如 1 个物体炸出上万实例），口径一远低于真实负载，
+    本条会在 detail 里点名实例来源，建议「实例化到点上 + 烘焙」。
+    """
     n = len(_objects())
     rows, max_depth = _dense_collection_rows(context)
-    if n < 3000 and not rows:
+    _, n_inst, per_source, total_eval = _instance_stats(context)
+    amplified = n_inst >= 1000
+    if n < 3000 and not rows and not amplified:
         return None
 
-    impact = IMPACT_HIGH if n > 8000 else IMPACT_MED
+    impact = IMPACT_HIGH if n > 8000 or total_eval > 20000 else IMPACT_MED
     lines = []
-    if n >= 3000:
-        lines.append(f"当前共 {n} 个对象。对象过多会拖慢视口、增大文件体积并加重渲染调度。")
+    if n >= 3000 or amplified:
+        lines.append(f"当前真实对象共 {n} 个。对象过多会拖慢视口、增大文件体积并加重渲染调度。")
 
     coll_names = []
     if rows:
@@ -185,6 +229,14 @@ def check_object_count(context):
             lines.append(f"集合嵌套最深达到 {max_depth} 层，过深会拖慢大纲视图操作。")
         if any(total >= 500 for _c, _d, total, _n in rows):
             impact = IMPACT_HIGH
+
+    if amplified:
+        lines.append(
+            f"按 Blender 统计口径（含实例）共约 {total_eval} 个对象，"
+            f"其中虚拟实例约 {n_inst} 个，来自："
+        )
+        for name, c in per_source.most_common(5):
+            lines.append(f"  「{name}」：约 {c} 个")
 
     other_scene = len(_objects()) - len(_scene_objects(context))
     if other_scene > 200:
@@ -198,9 +250,14 @@ def check_object_count(context):
     if rows:
         suggestion += ("按用途拆分过大的子集合；重复摆放的物件用集合实例代替；"
                         "超大集合可考虑单独整理后打包送烘焙。")
+    if amplified:
+        suggestion += (f"几何节点产生了约 {n_inst} 个虚拟实例，渲染/导出时会被逐一求值。"
+                       "分布类需求尽量用「实例化到点上」而非「实现实例」直接生成网格；"
+                       "结果已固定则用「烘焙」缓存几何节点，避免每帧重算。")
 
     return Finding(
-        "STRUCT.object_count", "场景对象数量过多", n, impact, EASE_HARD,
+        "STRUCT.object_count", "场景对象数量过多",
+        total_eval if amplified else n, impact, EASE_HARD,
         "\n".join(lines),
         suggestion,
         CATEGORY_STRUCTURE, _cap_names(coll_names) if coll_names else None,
@@ -302,24 +359,9 @@ def check_particle_heavy(context):
 
 
 def check_geonode_instances(context):
-    try:
-        depsgraph = context.evaluated_depsgraph_get()
-    except Exception:
+    _, _inst, per_source, total_eval = _instance_stats(context)
+    if not per_source:
         return None
-
-    per_source = Counter()
-    total_eval = 0
-    for inst in depsgraph.object_instances:
-        total_eval += 1
-        if not getattr(inst, 'is_instance', False):
-            continue
-        parent = getattr(inst, 'parent', None)
-        if parent is None:
-            continue
-        original = getattr(parent, 'original', parent)
-        name = getattr(original, 'name', None)
-        if name:
-            per_source[name] += 1
 
     flagged = sorted(
         ((name, n) for name, n in per_source.items() if n >= 200),

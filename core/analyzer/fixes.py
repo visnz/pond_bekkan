@@ -243,10 +243,11 @@ def fix_duplicate_materials(context, item):
 def fix_merge_same_material(context, item):
     """把同材质对象组用 Ctrl+J 合并为每组第一个对象。
 
-    对 Finding.obj_names 里的对象，按 material_slots 的材质 frozenset 重新分组
-    （不依赖 check 运行时的内部状态），每组把除保留对象外的对象 join 到保留对象。
-    多用户网格保护：users>1 的网格先 make single（复制数据），避免 join 污染共享数据。
+    修复时从当前数据重新分组（点击时场景可能已变，不依赖 check 运行时的内部状态），
+    会把当前 View Layer 内**所有**同材质（≥min_count）的对象组各自合并，不只是
+    Finding.obj_names 指向的最大一组——obj_names 仅用于列表定位，不是合并白名单。
     只操作当前 View Layer 可访问的对象，跨 scene / 不可见的对象静默跳过。
+    多用户网格保护：users>1 的网格先 make single（复制数据），避免 join 污染共享数据。
     返回 (fixed, skipped, info)。
     """
     groups = checks.collect_merge_same_material_groups()
