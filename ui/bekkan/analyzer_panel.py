@@ -136,10 +136,13 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
         layout = self.layout
         props = context.scene.analyzer_props
 
-        # 模式选择 + 运行
+        # 模式选择 + 运行 + 导出
         row = layout.row(align=True)
         row.prop(props, "mode", expand=True)
-        layout.operator("analyzer.run_visn", icon='TRIA_RIGHT', text="运行分析")
+        run_row = layout.row(align=True)
+        run_row.operator("analyzer.run_visn", icon='TRIA_RIGHT', text="运行分析")
+        run_row.operator("analyzer.export_report_visn", text="", icon='EXPORT',
+                         emboss=False)
 
         if not props.has_run:
             box = layout.box()
@@ -272,6 +275,16 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
                                  text="合并重复材质（保留每组第一个）", icon='CHECKMARK')
             op.key = item.key
             op.option = "merge"
+        elif item.key == "STRUCT.merge_same_material":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="合并同材质对象（Ctrl+J）", icon='JOIN')
+            op.key = item.key
+            op.option = "merge_objs"
+        elif item.key == "STRUCT.identical_duplicates":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="关联复制（共享网格数据）", icon='LINKED')
+            op.key = item.key
+            op.option = "link"
         else:
             layout.label(text="暂无可用的自动修复", icon='BLANK1')
 

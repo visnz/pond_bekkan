@@ -893,21 +893,34 @@ def check_non_uniform_scale(context):
 
 # ---- A4/A5 合并候选 ----
 
-def check_merge_same_material(context):
-    """同材质对象过多（如水晶吊坠数百个小件）→ 可合并为一个或集合实例化"""
+def collect_merge_same_material_groups(min_count=10):
+    """返回 [[obj, obj, ...], ...] 的同材质对象分组，供 check 与 fix 共用。
+
+    只收 mesh 对象，按 material_slots 的材质名 frozenset 分组，
+    只保留组内对象数 ≥ min_count 的组。每组按名称排序，第一个作为合并保留对象。
+    """
     groups = {}
     for o in _objects():
         if o.type != 'MESH' or not o.data:
             continue
         mats = frozenset(s.material.name for s in o.material_slots
-                         if s and s.material)
+                        if s and s.material)
         if not mats:
             continue
         groups.setdefault(mats, []).append(o)
-    cands = [(mats, objs) for mats, objs in groups.items() if len(objs) >= 10]
+    result = []
+    for objs in groups.values():
+        if len(objs) >= min_count:
+            result.append(sorted(objs, key=lambda x: x.name))
+    return result
+
+
+def check_merge_same_material(context):
+    """同材质对象过多（如水晶吊坠数百个小件）→ 可合并为一个或集合实例化"""
+    cands = collect_merge_same_material_groups()
     if not cands:
         return None
-    n_objs = sum(len(objs) for _, objs in cands)
+    n_objs = sum(len(objs) for objs in cands)
     impact = IMPACT_HIGH if n_objs > 200 else IMPACT_MED
     top = max(cands, key=lambda x: len(x[1]))
     return Finding(
@@ -917,7 +930,7 @@ def check_merge_same_material(context):
         "大量独立对象会拖慢视口与渲染调度，也增大文件体积。",
         "建议：确认后合并（Ctrl+J）或用集合实例化；纯装饰同材质小件"
         "（如水晶吊坠数百个）合并后用顶点色 / 贴图区分，可显著减负。",
-        CATEGORY_STRUCTURE, _cap_names([o.name for o in top[1]]),
+        CATEGORY_STRUCTURE, _cap_names([o.name for o in top]),
     )
 
 
@@ -936,14 +949,12 @@ def _mesh_geom_hash(mesh):
         return None
 
 
-def check_identical_duplicates(context):
-    """几何完全相同的重复网格：多为 Shift-D 复制未关联，可改为关联复制 / 实例化。
-    带形态键的网格跳过（其数据有额外意义，不适合直接合并）。
+def collect_identical_duplicate_groups():
+    """返回 [[keep_mesh, dup_mesh, ...], ...] 的几何相同重复网格分组，供 check 与 fix 共用。
+
+    只收无形态键的 mesh（带形态键的有额外意义，不合并）；超大网格（>5万顶点）跳过。
+    每组按 mesh 名排序，第一个作为关联复制保留对象。
     """
-    mesh_objs = {}
-    for o in _objects():
-        if o.type == 'MESH' and o.data:
-            mesh_objs.setdefault(o.data.name, []).append(o.name)
     groups = {}
     for m in bpy.data.meshes:
         if not m or m.shape_keys:
@@ -951,12 +962,28 @@ def check_identical_duplicates(context):
         h = _mesh_geom_hash(m)
         if h is not None:
             groups.setdefault(h, []).append(m)
-    dups = {h: ms for h, ms in groups.items() if len(ms) >= 2}
+    result = []
+    for ms in groups.values():
+        if len(ms) >= 2:
+            result.append(sorted(ms, key=lambda x: x.name))
+    return result
+
+
+def check_identical_duplicates(context):
+    """几何完全相同的重复网格：多为 Shift-D 复制未关联，可改为关联复制 / 实例化。
+    带形态键的网格跳过（其数据有额外意义，不适合直接合并）。
+    """
+    # mesh 名 → 引用它的对象名列表（用于详情/定位）
+    mesh_objs = {}
+    for o in _objects():
+        if o.type == 'MESH' and o.data:
+            mesh_objs.setdefault(o.data.name, []).append(o.name)
+    dups = collect_identical_duplicate_groups()
     if not dups:
         return None
-    n_dup = sum(len(ms) - 1 for ms in dups.values())
+    n_dup = sum(len(ms) - 1 for ms in dups)
     names = []
-    for h, ms in dups.items():
+    for ms in dups:
         for m in ms[1:]:
             names.extend(mesh_objs.get(m.name, []))
     return Finding(

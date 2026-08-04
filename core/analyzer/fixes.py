@@ -171,3 +171,93 @@ def fix_duplicate_materials(context, item):
             except Exception:
                 skipped += 1
     return fixed, skipped, {"kept_groups": len(groups)}
+
+
+def fix_merge_same_material(context, item):
+    """把同材质对象组用 Ctrl+J 合并为每组第一个对象。
+
+    对 Finding.obj_names 里的对象，按 material_slots 的材质 frozenset 重新分组
+    （不依赖 check 运行时的内部状态），每组把除保留对象外的对象 join 到保留对象。
+    多用户网格保护：users>1 的网格先 make single（复制数据），避免 join 污染共享数据。
+    只操作当前 View Layer 可访问的对象，跨 scene / 不可见的对象静默跳过。
+    返回 (fixed, skipped, info)。
+    """
+    groups = checks.collect_merge_same_material_groups()
+    if not groups:
+        return 0, 0, {}
+
+    vl_names = _view_layer_objects(context)
+    fixed = skipped = made_single = 0
+
+    for objs in groups:
+        # 只处理这一组里在当前 View Layer 的对象
+        in_vl = [o for o in objs if o.name in vl_names]
+        if len(in_vl) < 2:
+            skipped += len(in_vl)
+            continue
+        keep = in_vl[0]
+        rest = in_vl[1:]
+
+        # 多用户网格先单用户化（join 会要求对象网格数据不共享）
+        for o in in_vl:
+            data = getattr(o, 'data', None)
+            if data is not None and getattr(data, 'users', 1) > 1:
+                try:
+                    o.data = data.copy()
+                    made_single += 1
+                except Exception:
+                    skipped += 1
+
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+            for o in in_vl:
+                o.select_set(True)
+            context.view_layer.objects.active = keep
+            bpy.ops.object.join()
+            fixed += len(rest)
+        except Exception:
+            skipped += len(rest)
+    return fixed, skipped, {"made_single": made_single, "groups": len(groups)}
+
+
+def fix_identical_duplicates(context, item):
+    """把几何相同的重复网格改为关联复制（共享 keep mesh 的数据块）。
+
+    重新用 collect_identical_duplicate_groups() 分组（运行后场景可能已变），
+    每组 keep=第一个 mesh，把引用其余 mesh 的对象改为 obj.data = keep_mesh。
+    带形态键的 mesh 已被 collect 跳过；fix 独立再验一遍 mesh.shape_keys 保底。
+    只操作当前 View Layer 可访问的对象。旧 mesh 若 users 归 0 不会自动删，
+    报告在 info 里提示留待 Purge。返回 (fixed, skipped, info)。
+    """
+    groups = checks.collect_identical_duplicate_groups()
+    if not groups:
+        return 0, 0, {}
+
+    vl_names = _view_layer_objects(context)
+    fixed = skipped = 0
+    orphan_meshes = 0
+
+    for ms in groups:
+        keep = ms[0]
+        dups = ms[1:]
+        for dup in dups:
+            # 形态键保底：collect 已跳，但运行后状态可能变，再验一遍
+            if getattr(dup, 'shape_keys', None) is not None:
+                skipped += 1
+                continue
+            # 把引用 dup 的、在当前 View Layer 的对象改为引用 keep
+            for o in bpy.data.objects:
+                if o.type != 'MESH' or o.data is not dup:
+                    continue
+                if o.name not in vl_names:
+                    skipped += 1
+                    continue
+                try:
+                    o.data = keep
+                    fixed += 1
+                except Exception:
+                    skipped += 1
+            # dup 若已无引用，记一笔留待 Purge（不在此删，避免与 purge_unused 重复）
+            if getattr(dup, 'users', 1) == 0:
+                orphan_meshes += 1
+    return fixed, skipped, {"orphan_meshes": orphan_meshes, "groups": len(groups)}
