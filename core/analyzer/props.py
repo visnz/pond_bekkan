@@ -24,8 +24,8 @@ class AnalyzerProps(bpy.types.PropertyGroup):
     mode: EnumProperty(
         name="检查模式",
         items=[
-            ('QUICK', "简单检查", "快速扫描常用项（推荐先用这个）"),
-            ('DEEP', "深度检查", "含几何 / 合并 / 缩放统计等重计算（较慢）"),
+            ('QUICK', "简单检查（几秒）", "快速扫描常用项（推荐先用这个）"),
+            ('DEEP', "深度检查（几分钟）", "含几何 / 合并 / 缩放统计等重计算（较慢）"),
         ],
         default='QUICK',
     )  # type: ignore

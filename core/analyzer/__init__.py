@@ -7,7 +7,9 @@ from bpy.props import PointerProperty  # type: ignore
 
 from . import model, state, checks, fixes, ops, props as _props_mod
 from .props import AnalyzerProps, FindingItem
-from .ops import (ANALYZER_OT_run, ANALYZER_OT_select, ANALYZER_OT_toggle_mark,
+from .ops import (ANALYZER_OT_run, ANALYZER_OT_select,
+                  ANALYZER_OT_copy_names,
+                  ANALYZER_OT_toggle_mark,
                   ANALYZER_OT_clear_marks, ANALYZER_OT_fix,
                   ANALYZER_OT_export_report)
 
@@ -16,6 +18,7 @@ _CLASSES = [
     AnalyzerProps,
     ANALYZER_OT_run,
     ANALYZER_OT_select,
+    ANALYZER_OT_copy_names,
     ANALYZER_OT_toggle_mark,
     ANALYZER_OT_clear_marks,
     ANALYZER_OT_fix,

@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 dist/*
 TODO & debug .md
+temp/
+blender_dev_env/

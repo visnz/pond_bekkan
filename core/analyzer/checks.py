@@ -64,6 +64,11 @@ def _objects():
     return [o for o in bpy.data.objects if o is not None]
 
 
+def _scene_objects(context):
+    """当前场景实际链接的对象（跨 Scene 隔离；不同于全文件扫描的 _objects()）。"""
+    return [o for o in context.scene.objects if o is not None]
+
+
 def _materials():
     return [m for m in bpy.data.materials if m is not None]
 
@@ -107,17 +112,240 @@ def _engine(context):
 # A. 场景结构
 # ============================================================
 
+def _collection_object_total(coll, _depth=0):
+    """集合 + 全部子集合的对象总数（递归）。同一集合被多个父集合链接时两处都算数
+    （真实渲染负载如此），只加深度上限防御异常数据，不做去重。"""
+    total = len(coll.objects)
+    if _depth > 50:
+        return total
+    for child in coll.children:
+        total += _collection_object_total(child, _depth + 1)
+    return total
+
+
+def _layer_collection_object_total(layer_coll, _depth=0):
+    """按 View Layer 排除状态递归统计对象总数：exclude 的分支（及其全部子集合）
+    完全不计入——被排除的集合不参与该 View Layer 的求值，谈不上拖慢视口/渲染。"""
+    if layer_coll.exclude:
+        return 0
+    total = len(layer_coll.collection.objects)
+    if _depth > 50:
+        return total
+    for child in layer_coll.children:
+        total += _layer_collection_object_total(child, _depth + 1)
+    return total
+
+
+def _dense_collection_rows(context):
+    """当前 View Layer 里对象数 >=200 的集合，按 total 降序；同时返回最大嵌套深度。
+
+    沿 view_layer.layer_collection 树遍历（不是 scene.collection 数据树），排除
+    （exclude from view layer）的集合及其子树直接跳过，不计数、不列出。
+    """
+    rows = []  # (collection, depth, total, direct)
+    max_depth = 0
+
+    def _walk(layer_coll, depth):
+        nonlocal max_depth
+        if layer_coll.exclude:
+            return
+        max_depth = max(max_depth, depth)
+        if depth > 0:
+            coll = layer_coll.collection
+            rows.append((coll, depth, _layer_collection_object_total(layer_coll), len(coll.objects)))
+        if depth > 50:
+            return
+        for child in layer_coll.children:
+            _walk(child, depth + 1)
+
+    _walk(context.view_layer.layer_collection, 0)
+    flagged = sorted((r for r in rows if r[2] >= 200), key=lambda r: r[2], reverse=True)
+    return flagged, max_depth
+
+
 def check_object_count(context):
+    """场景对象数量过多：总数 + 具体哪些集合堆得多是同一件事，合成一条 Finding。"""
     n = len(_objects())
-    if n < 3000:
+    rows, max_depth = _dense_collection_rows(context)
+    if n < 3000 and not rows:
         return None
+
     impact = IMPACT_HIGH if n > 8000 else IMPACT_MED
+    lines = []
+    if n >= 3000:
+        lines.append(f"当前共 {n} 个对象。对象过多会拖慢视口、增大文件体积并加重渲染调度。")
+
+    coll_names = []
+    if rows:
+        for coll, depth, total, direct in rows:
+            mark = "⚠ " if total >= 500 else ""
+            lines.append(f"📦{mark}「{coll.name}」：{total} 个对象（直属 {direct}，层级深度 {depth}）")
+            coll_names.append(coll.name)
+        if max_depth > 6:
+            lines.append(f"集合嵌套最深达到 {max_depth} 层，过深会拖慢大纲视图操作。")
+        if any(total >= 500 for _c, _d, total, _n in rows):
+            impact = IMPACT_HIGH
+
+    other_scene = len(_objects()) - len(_scene_objects(context))
+    if other_scene > 200:
+        lines.append(
+            f"检测到其他 Scene 中还有约 {other_scene} 个未计入本次统计的物体，"
+            "如需了解请切换 Scene 后重新运行分析。"
+        )
+
+    suggestion = ("建议：用集合实例化重复物件；同材质小件（如水晶吊坠数百个）合并为一个；"
+                  "清理无用的辅助对象。")
+    if rows:
+        suggestion += ("按用途拆分过大的子集合；重复摆放的物件用集合实例代替；"
+                        "超大集合可考虑单独整理后打包送烘焙。")
+
     return Finding(
         "STRUCT.object_count", "场景对象数量过多", n, impact, EASE_HARD,
-        f"当前共 {n} 个对象。对象过多会拖慢视口、增大文件体积并加重渲染调度。",
-        "建议：用集合实例化重复物件；同材质小件（如水晶吊坠数百个）合并为一个；"
-        "清理无用的辅助对象。",
-        CATEGORY_STRUCTURE,
+        "\n".join(lines),
+        suggestion,
+        CATEGORY_STRUCTURE, _cap_names(coll_names) if coll_names else None,
+    )
+
+
+def check_collection_instance_multiplier(context):
+    refs = Counter()
+    empties_by_coll = {}
+    for o in _scene_objects(context):
+        if o.type != 'EMPTY' or getattr(o, 'instance_type', None) != 'COLLECTION':
+            continue
+        coll = getattr(o, 'instance_collection', None)
+        if coll is None:
+            continue
+        refs[coll.name] += 1
+        empties_by_coll.setdefault(coll.name, []).append(o.name)
+
+    if not refs:
+        return None
+
+    flagged = []
+    for name, n in refs.items():
+        coll = bpy.data.collections.get(name)
+        if coll is None:
+            continue
+        m = _collection_object_total(coll)
+        load = n * m
+        if load >= 2000:
+            flagged.append((name, n, m, load))
+    if not flagged:
+        return None
+    flagged.sort(key=lambda r: r[3], reverse=True)
+
+    lines = [
+        f"集合「{name}」被 {n} 个实例引用，该集合含 {m} 个对象，实际渲染负载 ≈ {n}×{m} = {load}"
+        for name, n, m, load in flagged
+    ]
+    obj_names = []
+    for name, *_r in flagged:
+        obj_names.extend(empties_by_coll.get(name, []))
+
+    impact = IMPACT_HIGH if any(load >= 10000 for _n, _c, _m, load in flagged) else IMPACT_MED
+    return Finding(
+        "STRUCT.collection_instance_multiplier", "集合实例引用叠加负载过高", len(flagged),
+        impact, EASE_HARD,
+        "\n".join(lines),
+        "建议：确认是否所有实例都需要同样精度；数量多但远景可见的可换成低模 LOD 集合。",
+        CATEGORY_STRUCTURE, _cap_names(obj_names),
+    )
+
+
+def check_particle_heavy(context):
+    flagged = []  # (obj_name, est, amplified)
+    for o in _scene_objects(context):
+        systems = getattr(o, 'particle_systems', None)
+        if not systems:
+            continue
+        est_total = 0
+        amplified = False
+        for ps in systems:
+            settings = getattr(ps, 'settings', None)
+            if settings is None:
+                continue
+            base = _as_int(getattr(settings, 'count', 0)) or 0
+            child_mult = 1
+            if getattr(settings, 'child_type', 'NONE') != 'NONE':
+                for attr in ('rendered_child_count', 'child_nbr'):
+                    v = _as_int(getattr(settings, attr, None))
+                    if v:
+                        child_mult = v
+                        break
+            est_total += base * child_mult
+            if getattr(settings, 'render_type', 'NONE') in {'OBJECT', 'COLLECTION'}:
+                amplified = True
+        if est_total >= 1000:
+            flagged.append((o.name, est_total, amplified))
+
+    if not flagged:
+        return None
+    flagged.sort(key=lambda r: r[1], reverse=True)
+
+    lines = []
+    for name, est, amplified in flagged:
+        line = f"{name}：约 {est} 根/粒子"
+        if amplified:
+            line += "（渲染为 Object/Collection，实际几何负载会按渲染对象复杂度再放大）"
+        lines.append(line)
+
+    impact = IMPACT_HIGH if any(est >= 10000 for _n, est, _a in flagged) else IMPACT_MED
+    return Finding(
+        "STRUCT.particle_heavy", "毛发/粒子数量过多", len(flagged),
+        impact, EASE_HARD,
+        "\n".join(lines),
+        "建议：确认密度是否必要；可降低 Child 数量、开启视口精简显示比例，"
+        "或结果固定后转换为静态网格。",
+        CATEGORY_STRUCTURE, _cap_names([n for n, *_r in flagged]),
+    )
+
+
+def check_geonode_instances(context):
+    try:
+        depsgraph = context.evaluated_depsgraph_get()
+    except Exception:
+        return None
+
+    per_source = Counter()
+    total_eval = 0
+    for inst in depsgraph.object_instances:
+        total_eval += 1
+        if not getattr(inst, 'is_instance', False):
+            continue
+        parent = getattr(inst, 'parent', None)
+        if parent is None:
+            continue
+        original = getattr(parent, 'original', parent)
+        name = getattr(original, 'name', None)
+        if name:
+            per_source[name] += 1
+
+    flagged = sorted(
+        ((name, n) for name, n in per_source.items() if n >= 200),
+        key=lambda r: r[1], reverse=True,
+    )
+
+    lines = [f"{name}：几何节点/实例生成约 {n} 个虚拟实例" for name, n in flagged]
+
+    scene_n = len(_scene_objects(context))
+    if scene_n > 0 and total_eval > scene_n * 3 and (total_eval - scene_n) > 500:
+        lines.append(
+            f"全场景真实渲染实例总数约 {total_eval}，远高于场景对象数 {scene_n}，"
+            "说明存在隐藏的实例化负载。"
+        )
+
+    if not lines:
+        return None
+
+    impact = IMPACT_HIGH if any(n >= 2000 for _n, n in flagged) else IMPACT_MED
+    return Finding(
+        "STRUCT.geonode_instances", "几何节点/实例生成了大量虚拟实例", len(flagged),
+        impact, EASE_HARD,
+        "\n".join(lines),
+        "建议：在几何节点里尽量用『实例化到点上』而非『实现实例』直接生成网格几何；"
+        "若结果已固定，可用『烘焙』缓存几何节点结果，避免每帧重新计算。",
+        CATEGORY_STRUCTURE, _cap_names([name for name, _n in flagged]),
     )
 
 
@@ -258,17 +486,25 @@ def check_light_count(context):
     if len(lights) < 15:
         return None
     scene = context.scene
-    cyc = getattr(scene, 'cycles', None)
+    eng = _engine(context)
     detail = [f"当前共 {len(lights)} 盏灯光"]
     sug = []
-    if cyc is not None:
-        if getattr(cyc, 'use_light_tree', True) is False:
-            detail.append("Light Tree 未开启")
-            sug.append("开启 Light Tree，可大幅降低多灯光采样成本")
-        if getattr(cyc, 'use_shadow_culling', False) is False:
-            detail.append("阴影剔除未开启")
-            sug.append("开启阴影剔除，减少无效灯光的阴影计算")
-    sug.append("对只影响局部的灯用 Light Linking 限定范围；关掉远处灯光阴影")
+    if eng == 'CYCLES':
+        cyc = getattr(scene, 'cycles', None)
+        if cyc is not None:
+            if getattr(cyc, 'use_light_tree', True) is False:
+                detail.append("Light Tree 未开启")
+                sug.append("开启 Light Tree，可大幅降低多灯光采样成本")
+            if getattr(cyc, 'use_shadow_culling', False) is False:
+                detail.append("阴影剔除未开启")
+                sug.append("开启阴影剔除，减少无效灯光的阴影计算")
+        sug.append("对只影响局部的灯用 Light Linking 限定范围；关掉远处灯光阴影")
+    elif eng == 'EEVEE':
+        sug.append("对只影响局部的灯用 Light Linking 限定范围")
+        sug.append("非主体光源关闭阴影投射（灯光数据的 Shadow 选项），能省不少阴影贴图开销")
+        sug.append("阴影质量吃紧的话去检查阴影池大小（本工具的「阴影池过大」检查项）")
+    else:
+        sug.append("对只影响局部的灯用 Light Linking 限定范围；关掉远处灯光阴影")
     return Finding(
         "RENDER.light_count", "灯光数量过多", len(lights),
         IMPACT_MED, EASE_HALF,
@@ -297,11 +533,18 @@ def check_sampling(context):
             impact = impact or IMPACT_MED
             detail.append("自适应采样未开启")
             sug.append("开启自适应采样（Adaptive Sampling）")
-        th = getattr(cyc, 'adaptive_threshold', None)
-        if adaptive and th is not None and th < 0.05:
+        # 视口（预览）与渲染的噪点阈值是两个独立属性，目标区间不同：
+        # 视口建议 ~0.1（够快即可），渲染建议 0.02~0.04（保画质）。
+        render_th = getattr(cyc, 'adaptive_threshold', None)
+        if adaptive and render_th is not None and render_th < 0.02:
             impact = impact or IMPACT_MED
-            detail.append(f"噪点阈值过低（{th}）")
-            sug.append("把噪点阈值提升到 0.03~0.05，预览时尤其明显")
+            detail.append(f"渲染噪点阈值过低（{round(render_th, 3)}）")
+            sug.append("把渲染噪点阈值提升到 0.02~0.04 左右")
+        preview_th = getattr(cyc, 'preview_adaptive_threshold', None)
+        if adaptive and preview_th is not None and preview_th < 0.05:
+            impact = impact or IMPACT_MED
+            detail.append(f"视口噪点阈值过低（{round(preview_th, 3)}）")
+            sug.append("把视口（预览）噪点阈值提升到 0.1 左右，视口交互会明显更流畅")
     elif eng == 'EEVEE':
         eevee = getattr(scene, 'eevee', None)
         if eevee is None:
@@ -374,19 +617,14 @@ def check_persistent_data(context):
         return None
     scene = context.scene
     if getattr(scene.render, 'use_persistent_data', False):
-        return Finding(
-            "RENDER.persistent_data", "已开启保留数据（Persistent Data）", 0,
-            IMPACT_LOW, EASE_ONE,
-            "use_persistent_data 开启：几何数据跨渲染持久保留，减少重复加载，但显著占用内存。",
-            "小场景建议关闭以省内存；大场景（数百万面）若频繁渲染可保持开启。",
-            CATEGORY_RENDER,
-        )
+        return None
     if len(_objects()) > 5000:
         return Finding(
-            "RENDER.persistent_data", "未开启保留数据（大场景建议开启）", 0,
+            "RENDER.persistent_data", "未开启保留数据（建议开启）", 0,
             IMPACT_MED, EASE_ONE,
             "当前对象较多且未开启 use_persistent_data，渲染时几何数据可能反复加载。",
-            "若渲染明显卡在几何加载，可在渲染面板开启「保留数据」。",
+            "点击下方按钮一键开启「保留数据」，减少重复渲染时的几何加载耗时"
+            "（会占用更多内存，若内存紧张可再关闭）。",
             CATEGORY_RENDER,
         )
     return None
@@ -437,19 +675,39 @@ def check_output_format(context):
     )
 
 
-def _has_available_gpu():
+# 按推荐优先级排列的 GPU 计算后端；NVIDIA 显卡上 OptiX 通常比 CUDA 更快（有硬件光追加速）。
+_GPU_BACKENDS = ('OPTIX', 'CUDA', 'HIP', 'ONEAPI', 'METAL')
+
+
+def _detect_gpu_backend():
+    """探测系统里实际可用的 GPU 计算后端，不依赖 Preferences 里当前选中的
+    compute_device_type——用户可能从没打开过「Cycles 渲染设备」这个开关
+    （此时 compute_device_type 是 'NONE'），但机器上可能确实插着能跑
+    OptiX/CUDA 的显卡，旧写法（比对 devices 里 type==当前 compute_device_type）
+    在 compute_device_type 为 'NONE' 时永远查不到任何设备，漏检了这种情况。
+
+    用 get_devices_for_type() 主动探测每个后端，不改动当前选中的 compute_device_type。
+    返回 (backend, [device_name, ...])；backend 为 None 表示没探测到任何 GPU。
+    """
     try:
         prefs = bpy.context.preferences.addons.get('cycles')
         if not prefs:
-            return False
+            return None, []
         p = prefs.preferences
-        cdt = getattr(p, 'compute_device_type', '')
-        for d in getattr(p, 'devices', []):
-            if getattr(d, 'type', '') == cdt and getattr(d, 'use', False):
-                return True
+        probe = getattr(p, 'get_devices_for_type', None)
+        if probe is None:
+            return None, []
+        for backend in _GPU_BACKENDS:
+            try:
+                devices = probe(backend)
+            except Exception:
+                continue
+            names = [d.name for d in devices if getattr(d, 'type', '') == backend]
+            if names:
+                return backend, names
     except Exception:
-        return False
-    return False
+        pass
+    return None, []
 
 
 def check_device(context):
@@ -463,13 +721,15 @@ def check_device(context):
         return None
     if device in ('GPU', 'CPU+GPU'):
         return None
-    if not _has_available_gpu():
+    backend, names = _detect_gpu_backend()
+    if not backend:
         return None
     return Finding(
         "RENDER.device", "渲染设备未使用 GPU", 0,
         IMPACT_HIGH, EASE_HALF,
-        f"当前 Cycles 设备为 {device}，但检测到可用 GPU。",
-        "建议：Cycles 设备设为 GPU 或 CPU+GPU（注意显存容量），渲染明显提速。",
+        f"当前 Cycles 设备为 {device}，但检测到可用 GPU（{backend}：{'、'.join(names)}）。",
+        f"建议：在 Preferences → System 里把 Cycles 计算后端设为 {backend}"
+        "（如果还没开启过 GPU 计算，这里会顺手打开），再把场景的 Cycles 设备设为 GPU。",
         CATEGORY_RENDER,
     )
 
@@ -682,8 +942,55 @@ def check_material_images(context):
     )
 
 
+def check_normal_map_colorspace(context):
+    """检测接在「法线贴图」节点上的贴图是否设为 Non-Color 色彩空间。
+
+    算法与 core/synccheck.py 的 _scan_normal_images 是同一套（应用户要求复用
+    蛙灾侧已验证的检测逻辑），但不直接 import 那个模块——core/analyzer 独立版
+    打包时只带 core/analyzer/ 一个目录（build.py 的 _iter_analyzer_source_files），
+    跨到 core/synccheck.py 的 import 会让独立版一加载就 ModuleNotFoundError，
+    这里改成同算法的自包含实现，只检测节点连线（不做按名字猜测的兜底，
+    避免独立实现和原版行为在边界情况上悄悄分叉）。
+    """
+    bad = {}
+    for mat in bpy.data.materials:
+        if not mat or not mat.use_nodes or mat.library or not mat.node_tree:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.type != 'NORMAL_MAP':
+                continue
+            color_input = node.inputs.get('Color')
+            if color_input is None:
+                continue
+            for link in color_input.links:
+                src = link.from_node
+                if src.type == 'TEX_IMAGE' and src.image and \
+                        src.image.colorspace_settings.name != 'Non-Color':
+                    bad.setdefault(src.image.name, mat.name)
+    if not bad:
+        return None
+    names = sorted(bad)
+    lines = [f"{n}（接在「{bad[n]}」的法线节点上）" for n in names]
+    names_text = "\n".join(lines[:20])
+    if len(lines) > 20:
+        names_text += f"\n…以及另外 {len(lines) - 20} 张"
+    return Finding(
+        "MAT.normal_map_colorspace", "法线贴图色彩空间未设为 Non-Color", len(names),
+        IMPACT_MED, EASE_ONE,
+        f"{len(names)} 张接在「法线贴图」节点上的贴图色彩空间不是 Non-Color，"
+        "会被当作 sRGB 颜色数据处理伽马校正，导致法线方向/凹凸细节计算出错。",
+        "建议：点击「全部改成 Non-Color」一键修正。\n" + names_text,
+        CATEGORY_MATERIAL,
+    )
+
+
 def check_big_textures(context):
-    """检查过大贴图；按尺寸从大到小排序并在详情中列出名字。"""
+    """检查过大贴图；按尺寸从大到小排序并在详情中列出名字。
+
+    与「Cycles 贴图尺寸未做视口/渲染钳制」原本是两个独立检查项，但对使用者来说
+    两者说的是同一件事（贴图太大），只是严重程度/处理难度不同——合并成一条，
+    只在确实存在过大贴图时才提「顺手把钳制也打开」，避免用户在列表里看到两条
+    重复的「贴图太大」提醒却要分别去理解和处理。"""
     big = []
     for img in bpy.data.images:
         if not img or not _is_real_image(img):
@@ -705,34 +1012,60 @@ def check_big_textures(context):
     if len(lines) > 20:
         names_text += f"\n…以及另外 {len(lines) - 20} 张"
 
+    suggestion = "建议：按实际使用钳制/缩小贴图尺寸（如 8K→2K），必要时压缩。"
+    if _engine(context) == 'CYCLES':
+        cycles = context.scene.cycles
+        tex_view = getattr(cycles, 'texture_limit', 'OFF')
+        tex_render = getattr(cycles, 'texture_limit_render', 'OFF')
+        if tex_view == 'OFF' and tex_render == 'OFF':
+            suggestion += ("\n当前 Cycles 的「简化 → 纹理限制」在视口与渲染均为关闭，"
+                          "点击「限制 2K」或「限制 4K」会同时钳制视口与渲染的纹理尺寸上限。")
+    suggestion += "\n" + names_text
+
     return Finding(
         "MAT.big_textures", "存在过大的贴图", len(big), impact, EASE_HALF,
         f"{len(big)} 张贴图达到 4K+（其中 {n8k} 张 8K+），显存与加载开销大。",
-        "建议：按实际使用钳制/缩小贴图尺寸（如 8K→2K），必要时压缩。\n" + names_text,
-        CATEGORY_MATERIAL, [i.name for i in big],
+        suggestion,
+        CATEGORY_MATERIAL,
     )
 
 
-def check_texture_clamp(context):
-    """Cycles 下检查 viewport 与 render 的 texture_limit 是否开启。
+_SUBDIV_MOD_TYPES = ('SUBSURF', 'MULTIRES')
 
-    EEVEE 没有对应的 per-scene 贴图钳制，此检查在 EEVEE 下直接返回 None。
-    """
-    if _engine(context) != 'CYCLES':
+
+def check_subdivision_high(context):
+    """细分曲面 / 多分辨率修改器级数过高（视口或渲染 ≥3）：细分面数按约 4^级数 增长，
+    级数每 +1 面数约 ×4，级数 5 相对级数 1 面数可达上百倍。"""
+    bad = []
+    for o in _scene_objects(context):
+        if o.type != 'MESH':
+            continue
+        for mod in o.modifiers:
+            if mod.type not in _SUBDIV_MOD_TYPES:
+                continue
+            view_lv = getattr(mod, 'levels', 0) if getattr(mod, 'show_viewport', True) else 0
+            render_lv = getattr(mod, 'render_levels', 0) if getattr(mod, 'show_render', True) else 0
+            lv = max(view_lv, render_lv)
+            if lv >= 3:
+                bad.append((o, mod.type, lv))
+    if not bad:
         return None
-    cycles = context.scene.cycles
-    tex_view = getattr(cycles, 'texture_limit', 'OFF')
-    tex_render = getattr(cycles, 'texture_limit_render', 'OFF')
-    if tex_view != 'OFF' or tex_render != 'OFF':
-        return None
+
+    bad.sort(key=lambda r: -r[2])
+    max_lv = bad[0][2]
+    impact = IMPACT_HIGH if max_lv >= 5 else IMPACT_MED
+    lines = [f"「{o.name}」的 {mtype} 修改器细分级数 {lv}" for o, mtype, lv in bad[:20]]
+    if len(bad) > 20:
+        lines.append(f"…以及另外 {len(bad) - 20} 个")
+
     return Finding(
-        "MAT.texture_clamp", "Cycles 贴图尺寸未做视口/渲染钳制", 1,
-        IMPACT_MED, EASE_ONE,
-        "当前 Cycles 的「简化 → 纹理限制」在视口与渲染均为关闭，"
-        "大贴图会占用大量显存并拖慢视口交互。",
-        "建议：点击「Cycles 限制 2K」或「Cycles 限制 4K」为视口设置纹理上限；"
-        "渲染输出如需完整精度可保留渲染限制为 OFF。",
-        CATEGORY_MATERIAL,
+        "GEOM.subdivision_high", "存在细分级数过高的修改器", len(bad),
+        impact, EASE_HALF,
+        "\n".join(lines),
+        "建议：非近景/非主体物体降低细分级数（尤其渲染级数）；也可点击下方按钮用"
+        "「简化」总开关统一钳制全场景细分级数上限（不改各修改器自身的级数值，"
+        "只是运行时限制上限，视口与渲染同时生效）。",
+        CATEGORY_STRUCTURE, _cap_names([o.name for o, _mt, _lv in bad]),
     )
 
 
@@ -799,6 +1132,8 @@ def check_orphan_data(context):
 # 简单检查的入口列表（定义在文件末尾，确保引用的函数均已定义）
 _QUICK_CHECKS = [
     check_object_count,
+    check_collection_instance_multiplier,
+    check_particle_heavy,
     check_negative_scale,
     check_tiny_scale,
     check_big_scale,
@@ -818,8 +1153,9 @@ _QUICK_CHECKS = [
     check_world_volume,
     check_duplicate_materials,
     check_material_images,
+    check_normal_map_colorspace,
     check_big_textures,
-    check_texture_clamp,
+    check_subdivision_high,
     check_unused_materials,
     check_orphan_data,
     check_unused_actions,
@@ -922,7 +1258,7 @@ def check_merge_same_material(context):
         return None
     n_objs = sum(len(objs) for objs in cands)
     impact = IMPACT_HIGH if n_objs > 200 else IMPACT_MED
-    top = max(cands, key=lambda x: len(x[1]))
+    top = max(cands, key=len)
     return Finding(
         "STRUCT.merge_same_material", "同材质对象过多，可考虑合并", n_objs,
         impact, EASE_HALF,
@@ -1125,6 +1461,7 @@ def check_non_manifold(context):
 
 # 深度检查的入口列表（定义在文件末尾，确保引用的函数均已定义）
 _DEEP_CHECKS = [
+    check_geonode_instances,
     check_scale_range,
     check_non_uniform_scale,
     check_merge_same_material,

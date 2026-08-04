@@ -203,26 +203,54 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
             meta.label(text=f"类别：{item.category}")
 
         box.separator()
-        box.label(text="问题详情：", icon='QUESTION')
+        detail_box = box.box()
+        detail_box.label(text="问题详情：", icon='QUESTION')
         for line in _wrap(item.detail):
-            box.label(text=line)
+            detail_box.label(text=line)
 
         box.separator()
-        box.label(text="处理手段：", icon='TOOL_SETTINGS')
+        sug_box = box.box()
+        sug_box.label(text="处理手段：", icon='TOOL_SETTINGS')
         for line in _wrap(item.suggestion):
-            box.label(text=line)
+            sug_box.label(text=line)
 
-        # 修复操作通道
+        box.separator()
         fix_box = box.box()
         fix_box.label(text="快速修复：")
         self._draw_fix_buttons(context, fix_box, item)
 
-        if item.obj_names:
-            box.separator()
-            op = box.operator("analyzer.select_visn",
-                              text=f"选中相关对象（{item.obj_names.count(chr(10)) + 1} 个）",
-                              icon='RESTRICT_SELECT_OFF')
-            op.key = item.key
+        self._draw_locator_buttons(context, box, item)
+
+    def _draw_locator_buttons(self, context, layout, item):
+        """按建议类型决定「相关对象/集合」的定位方式，避免对超大集合直接全选卡死。
+
+        「问题详情」里的名称是 UILayout.label 渲染的纯文本，Blender 的 N 面板里
+        label 文本本身无法像文本编辑器那样框选复制（平台限制，插件无法绕过）；
+        这里始终提供一个「复制名称到剪贴板」按钮作为变通方案，方便粘贴进大纲的
+        搜索框按名字过滤查找。
+        """
+        if not item.obj_names:
+            return
+        names = [n for n in item.obj_names.split("\n") if n]
+        if not names:
+            return
+
+        layout.separator()
+        op = layout.operator("analyzer.copy_names_visn",
+                             text=f"复制名称到剪贴板（{len(names)} 个）",
+                             icon=_icon('COPYDOWN'))
+        op.key = item.key
+
+        if item.key in {"STRUCT.object_count", "MAT.big_textures", "MAT.images_per_material"}:
+            # obj_names 在这些 key 下存的不是可安全选中的对象名（集合名/贴图名），
+            # 或者材质类问题本身要处理的是材质而不是「使用该材质的对象」——
+            # 选中对象对定位材质问题没有实际帮助，只保留复制名称按钮
+            return
+
+        op = layout.operator("analyzer.select_visn",
+                             text=f"选中相关对象（{len(names)} 个）",
+                             icon='RESTRICT_SELECT_OFF')
+        op.key = item.key
 
     def _draw_fix_buttons(self, context, layout, item):
         if item.key == "TRANS.negative_scale":
@@ -234,7 +262,7 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
             box = layout.column(align=True)
             engine = context.scene.render.engine
             if engine.endswith('CYCLES'):
-                box.label(text="Cycles 场景可设置视口纹理限制：")
+                box.label(text="Cycles 场景可设置纹理尺寸上限：")
                 row = box.row(align=True)
                 op = row.operator("analyzer.fix_visn", text="限制 4K", icon='IMAGE')
                 op.key = item.key
@@ -242,21 +270,27 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
                 op = row.operator("analyzer.fix_visn", text="限制 2K", icon='IMAGE')
                 op.key = item.key
                 op.option = "2048"
-                box.label(text="注：修改 scene.cycles.texture_limit，仅影响 Cycles 视口。",
-                          icon='INFO')
+                box.label(text="注：同时设置视口与渲染的纹理限制（scene.cycles.texture_limit"
+                          " / texture_limit_render）。", icon='INFO')
             else:
                 box.label(text="EEVEE 没有 scene.cycles.texture_limit，建议手动缩小图像尺寸。",
                           icon='ERROR')
-        elif item.key == "MAT.texture_clamp":
+        elif item.key == "MAT.normal_map_colorspace":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="全部改成 Non-Color", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "GEOM.subdivision_high":
             box = layout.column(align=True)
+            box.label(text="用「简化」总开关统一钳制全场景细分级数上限：")
             row = box.row(align=True)
-            op = row.operator("analyzer.fix_visn", text="限制 4K", icon='IMAGE')
+            op = row.operator("analyzer.fix_visn", text="限制到 2 级", icon=_icon('MOD_SUBSURF'))
             op.key = item.key
-            op.option = "4096"
-            op = row.operator("analyzer.fix_visn", text="限制 2K", icon='IMAGE')
+            op.option = "2"
+            op = row.operator("analyzer.fix_visn", text="限制到 1 级", icon=_icon('MOD_SUBSURF'))
             op.key = item.key
-            op.option = "2048"
-            box.label(text="设置 scene.cycles.texture_limit（仅 Cycles 有效）", icon='INFO')
+            op.option = "1"
+            box.label(text="注：不修改各修改器自身级数，只设置运行时上限（视口+渲染同时生效）。",
+                      icon='INFO')
         elif item.key == "VIS.viewport_only":
             row = layout.row(align=True)
             op = row.operator("analyzer.fix_visn", text="全部改为渲染可见", icon='RESTRICT_RENDER_OFF')
@@ -265,11 +299,61 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
             op = row.operator("analyzer.fix_visn", text="全部改为视图不可见", icon='RESTRICT_VIEW_ON')
             op.key = item.key
             op.option = "viewport_hidden"
-        elif item.key in {"DATA.unused_materials", "DATA.orphans"}:
+        elif item.key in {"DATA.unused_materials", "DATA.orphans", "DATA.unused_actions"}:
             op = layout.operator("analyzer.fix_visn",
                                  text="清理未使用数据（Purge）", icon='TRASH')
             op.key = item.key
             op.option = "purge"
+        elif item.key == "STRUCT.empty_objects":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="删除无内容的空物体", icon='TRASH')
+            op.key = item.key
+        elif item.key == "STRUCT.orphan_objects":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="移入「_未分类孤立对象」集合", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.persistent_data":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="开启保留数据（Persistent Data）", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.motion_blur":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="关闭运动模糊", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "EEVEE.shadows":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="阴影池限制到 2048", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.device":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="切到 GPU 渲染", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.bounces":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="限制反弹/光追/焦散到建议值", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.output_format":
+            op = layout.operator("analyzer.fix_visn",
+                                 text="按建议压缩输出格式", icon='CHECKMARK')
+            op.key = item.key
+        elif item.key == "RENDER.sampling":
+            box = layout.column(align=True)
+            engine = context.scene.render.engine
+            if engine.endswith('CYCLES'):
+                op = box.operator("analyzer.fix_visn",
+                                  text="自动调整（视口 0.1 / 渲染 0.03）", icon='CHECKMARK')
+                op.key = item.key
+            else:
+                box.label(text="EEVEE 采样数需按画面手动权衡，暂不自动修复", icon='ERROR')
+        elif item.key == "RENDER.light_count":
+            box = layout.column(align=True)
+            engine = context.scene.render.engine
+            if engine.endswith('CYCLES'):
+                op = box.operator("analyzer.fix_visn",
+                                  text="开启 Light Tree + 阴影剔除", icon='CHECKMARK')
+                op.key = item.key
+            else:
+                box.label(text="该优化仅适用于 Cycles", icon='ERROR')
         elif item.key == "MAT.duplicate_materials":
             op = layout.operator("analyzer.fix_visn",
                                  text="合并重复材质（保留每组第一个）", icon='CHECKMARK')

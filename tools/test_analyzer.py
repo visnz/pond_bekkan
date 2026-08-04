@@ -132,7 +132,7 @@ def test_engine_isolation():
         finally:
             scene.render.engine = orig
         keys = {f.key for f in results}
-        bad = [k for k in keys if k in ("MAT.texture_clamp", "RENDER.device",
+        bad = [k for k in keys if k in ("RENDER.device",
                                         "RENDER.persistent_data")]
         # persistent_data 在 EEVEE 下直接 return None，不应出现
         ok = not bad

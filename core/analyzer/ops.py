@@ -12,6 +12,23 @@ def _log(msg):
     print(f"[Analyzer] {msg}")
 
 
+def _tag_redraw_all(context):
+    """强制刷新所有窗口的所有区域（做法同 core/addonmanager/common.py 的
+    update_list_filter）。
+
+    修复动作大多是直接对 scene.render/scene.cycles/scene.eevee 或对象可见性
+    赋值，改动结果显示在属性编辑器的渲染/输出/对象标签页或大纲视图里——这些都
+    不是按钮所在的 3D 视口 N 面板，Blender 不会自动重绘它们；不刷新的表现就是
+    「明明改了但面板上看不出来，切一下别的标签页/引擎才更新」。
+    """
+    wm = getattr(context, "window_manager", None)
+    if wm is None:
+        return
+    for window in wm.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
+
+
 def _sync_findings(context, results):
     """把分析结果同步进列表集合（列表行数据随 .blend 保存）"""
     props = context.scene.analyzer_props
@@ -31,6 +48,27 @@ def _sync_findings(context, results):
     _log(f"已同步 {len(results)} 条结果到列表")
 
 
+def _rerun_analysis(context):
+    """直接调用检查逻辑并同步结果，不经过 operator 层。
+
+    ANALYZER_OT_fix 的部分修复分支（清理未使用数据/合并同材质等）修完数据后
+    要刷新一遍建议列表；之前是嵌套调用 bpy.ops.analyzer.run_visn()——在一个
+    还没执行完的、带 UNDO 的 operator 内部再触发另一个 operator（其内部还会
+    强制刷一次 depsgraph），是 Ctrl+Z 反复撤销后容易把 undo 栈搞乱甚至崩溃的
+    高风险写法，这里改成直接调函数，效果一样但不再嵌套 operator 调用。
+    """
+    props = context.scene.analyzer_props
+    if props.mode == 'DEEP':
+        results = run_deep(context)   # 深度 = 简单 + 批 2（几何/合并/缩放统计）
+    else:
+        results = run_quick(context)
+    model.LAST_RESULTS = results
+    model.LAST_MODE = props.mode
+    _sync_findings(context, results)
+    props.has_run = True
+    return results
+
+
 class ANALYZER_OT_run(bpy.types.Operator):
     bl_idname = "analyzer.run_visn"
     bl_label = "运行工程分析"
@@ -38,16 +76,8 @@ class ANALYZER_OT_run(bpy.types.Operator):
     bl_options = {'REGISTER'}
 
     def execute(self, context):
-        props = context.scene.analyzer_props
-        _log(f"运行分析，模式={props.mode}")
-        if props.mode == 'DEEP':
-            results = run_deep(context)   # 深度 = 简单 + 批 2（几何/合并/缩放统计）
-        else:
-            results = run_quick(context)
-        model.LAST_RESULTS = results
-        model.LAST_MODE = props.mode
-        _sync_findings(context, results)
-        props.has_run = True
+        _log(f"运行分析，模式={context.scene.analyzer_props.mode}")
+        results = _rerun_analysis(context)
         self.report({'INFO'}, f"分析完成：共 {len(results)} 条建议")
         return {'FINISHED'}
 
@@ -76,8 +106,12 @@ class ANALYZER_OT_select(bpy.types.Operator):
             self.report({'WARNING'}, "相关对象已不存在，请重新运行分析")
             return {'CANCELLED'}
 
-        bpy.ops.object.select_all(action='DESELECT')
+        # 直接对视图层物体置 select=False，不调用 bpy.ops.object.select_all——
+        # 该 operator 的 poll 要求处于 3D 视口上下文，从属性编辑器等其它区域触发
+        # 会报 "context is incorrect" 直接抛异常，绕开 operator 层更稳妥。
         vl = context.view_layer
+        for o in vl.objects:
+            o.select_set(False)
         selected = 0
         active_obj = None
         for o in found:
@@ -93,6 +127,29 @@ class ANALYZER_OT_select(bpy.types.Operator):
             return {'CANCELLED'}
         vl.objects.active = active_obj
         self.report({'INFO'}, f"已选中 {selected}/{len(found)} 个对象")
+        return {'FINISHED'}
+
+
+class ANALYZER_OT_copy_names(bpy.types.Operator):
+    bl_idname = "analyzer.copy_names_visn"
+    bl_label = "复制名称到剪贴板"
+    bl_description = "把该建议涉及的名称列表复制到系统剪贴板（可粘贴到大纲视图的搜索框里查找）"
+    bl_options = {'REGISTER'}
+
+    key: StringProperty(name="建议标识")  # type: ignore
+
+    def execute(self, context):
+        target = next((it for it in context.scene.analyzer_props.findings
+                       if it.key == self.key), None)
+        if target is None:
+            self.report({'ERROR'}, "未找到对应建议，请重新运行分析")
+            return {'CANCELLED'}
+        names = [n for n in target.obj_names.split("\n") if n]
+        if not names:
+            self.report({'WARNING'}, "该建议没有可复制的名称")
+            return {'CANCELLED'}
+        context.window_manager.clipboard = "\n".join(names)
+        self.report({'INFO'}, f"已复制 {len(names)} 个名称到剪贴板")
         return {'FINISHED'}
 
 
@@ -157,13 +214,26 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                 if info.get("made_single"):
                     msg += f"（其中 {info['made_single']} 个先复制为单用户）"
                 self.report({'INFO'}, msg)
-            elif item.key in {"MAT.big_textures", "MAT.texture_clamp"}:
+            elif item.key == "MAT.big_textures":
                 max_size = int(self.option)
                 fixed, skipped, info = fixes.fix_clamp_textures(context, item, max_size)
                 if skipped and info.get("reason"):
                     self.report({'WARNING'}, info["reason"])
                     return {'CANCELLED'}
-                self.report({'INFO'}, f"已设置 Cycles 视口纹理限制 {max_size}，跳过 {skipped} 项")
+                self.report({'INFO'},
+                           f"已设置 Cycles 视口+渲染纹理限制 {max_size} 并开启「简化」总开关"
+                           f"（否则该限制不会生效），跳过 {skipped} 项")
+            elif item.key == "MAT.normal_map_colorspace":
+                fixed, skipped, info = fixes.fix_normal_map_colorspace(context, item)
+                self.report({'INFO'}, f"已把 {fixed} 张贴图的色彩空间改成 Non-Color")
+            elif item.key == "GEOM.subdivision_high":
+                max_level = int(self.option)
+                fixed, skipped, info = fixes.fix_cap_subdivision(context, item, max_level)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'},
+                           f"已将「简化」细分级数上限设为 {max_level}（视口+渲染同时生效）")
             elif item.key == "VIS.viewport_only":
                 if self.option == "render_visible":
                     fixed, skipped, _ = fixes.fix_viewport_to_render_visible(context, item)
@@ -174,19 +244,77 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                 else:
                     self.report({'WARNING'}, "未知修复选项")
                     return {'CANCELLED'}
-            elif item.key in {"DATA.unused_materials", "DATA.orphans"}:
+            elif item.key in {"DATA.unused_materials", "DATA.orphans", "DATA.unused_actions"}:
                 fixed, skipped, info = fixes.fix_purge_unused(context, item)
                 if skipped:
                     self.report({'ERROR'}, "清理未使用数据失败")
                     return {'CANCELLED'}
                 self.report({'INFO'}, "已清理未使用的数据块")
                 # 清理后建议重新分析，数据已经变化
-                bpy.ops.analyzer.run_visn()
+                _rerun_analysis(context)
+            elif item.key == "STRUCT.empty_objects":
+                fixed, skipped, info = fixes.fix_empty_objects(context, item)
+                self.report({'INFO'}, f"已删除 {fixed} 个无内容的空物体")
+                if fixed:
+                    _rerun_analysis(context)
+            elif item.key == "STRUCT.orphan_objects":
+                fixed, skipped, info = fixes.fix_link_orphans(context, item)
+                self.report({'INFO'}, f"已移入专用集合 {fixed} 个，跳过 {skipped} 个")
+                if fixed:
+                    _rerun_analysis(context)
+            elif item.key == "RENDER.persistent_data":
+                fixed, skipped, info = fixes.fix_enable_persistent_data(context, item)
+                if skipped:
+                    self.report({'WARNING'}, "保留数据已是开启状态")
+                    return {'CANCELLED'}
+                self.report({'INFO'}, "已开启保留数据（Persistent Data）")
+            elif item.key == "RENDER.motion_blur":
+                fixed, skipped, info = fixes.fix_disable_motion_blur(context, item)
+                self.report({'INFO'}, "已关闭运动模糊")
+            elif item.key == "EEVEE.shadows":
+                fixed, skipped, info = fixes.fix_shadow_pool(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'}, "已把阴影池限制到 2048")
+            elif item.key == "RENDER.device":
+                fixed, skipped, info = fixes.fix_device_gpu(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                backend = info.get("backend")
+                msg = f"已把 Cycles 计算后端切到 {backend} 并将设备设为 GPU" if backend \
+                    else "已把 Cycles 渲染设备切到 GPU"
+                self.report({'INFO'}, msg)
+            elif item.key == "RENDER.bounces":
+                fixed, skipped, info = fixes.fix_cap_bounces(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'}, f"已调整 {fixed} 项反弹/光追/焦散设置")
+            elif item.key == "RENDER.output_format":
+                fixed, skipped, info = fixes.fix_output_compression(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'}, "已调整输出压缩设置")
+            elif item.key == "RENDER.sampling":
+                fixed, skipped, info = fixes.fix_adaptive_sampling(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'}, f"已调整 {fixed} 项采样设置")
+            elif item.key == "RENDER.light_count":
+                fixed, skipped, info = fixes.fix_light_perf_toggles(context, item)
+                if skipped and info.get("reason"):
+                    self.report({'WARNING'}, info["reason"])
+                    return {'CANCELLED'}
+                self.report({'INFO'}, f"已开启 {fixed} 项灯光性能优化")
             elif item.key == "MAT.duplicate_materials":
                 fixed, skipped, info = fixes.fix_duplicate_materials(context, item)
                 self.report({'INFO'}, f"已合并 {fixed} 个重复材质，跳过 {skipped} 个")
                 if fixed:
-                    bpy.ops.analyzer.run_visn()
+                    _rerun_analysis(context)
             elif item.key == "STRUCT.merge_same_material":
                 fixed, skipped, info = fixes.fix_merge_same_material(context, item)
                 msg = f"已合并 {fixed} 个同材质对象，跳过 {skipped} 个"
@@ -194,7 +322,7 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                     msg += f"（其中 {info['made_single']} 个先复制为单用户）"
                 self.report({'INFO'}, msg)
                 if fixed:
-                    bpy.ops.analyzer.run_visn()
+                    _rerun_analysis(context)
             elif item.key == "STRUCT.identical_duplicates":
                 fixed, skipped, info = fixes.fix_identical_duplicates(context, item)
                 msg = f"已关联复制 {fixed} 个对象，跳过 {skipped} 个"
@@ -202,7 +330,7 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                     msg += f"（{info['orphan_meshes']} 个旧网格待 Purge 清理）"
                 self.report({'INFO'}, msg)
                 if fixed:
-                    bpy.ops.analyzer.run_visn()
+                    _rerun_analysis(context)
             else:
                 self.report({'WARNING'}, "该条建议暂无自动修复")
                 return {'CANCELLED'}
@@ -210,6 +338,7 @@ class ANALYZER_OT_fix(bpy.types.Operator):
             _log(f"修复 {self.key} 失败：{e}")
             self.report({'ERROR'}, f"修复失败：{e}")
             return {'CANCELLED'}
+        _tag_redraw_all(context)
         return {'FINISHED'}
 
 
