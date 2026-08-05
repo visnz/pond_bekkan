@@ -262,19 +262,21 @@ class VIEW3D_PT_analyze_visn(bpy.types.Panel):
             box = layout.column(align=True)
             engine = context.scene.render.engine
             if engine.endswith('CYCLES'):
-                box.label(text="Cycles 场景可设置纹理尺寸上限：")
+                box.label(text="推荐：非破坏性钳制（视口+渲染纹理上限）：",
+                          icon=_icon('INFO'))
                 row = box.row(align=True)
-                op = row.operator("analyzer.fix_visn", text="限制 4K", icon='IMAGE')
+                op = row.operator("analyzer.fix_visn", text="限制 4K", icon=_icon('IMAGE'))
                 op.key = item.key
                 op.option = "4096"
-                op = row.operator("analyzer.fix_visn", text="限制 2K", icon='IMAGE')
+                op = row.operator("analyzer.fix_visn", text="限制 2K", icon=_icon('IMAGE'))
                 op.key = item.key
                 op.option = "2048"
-                box.label(text="注：同时设置视口与渲染的纹理限制（scene.cycles.texture_limit"
-                          " / texture_limit_render）。", icon='INFO')
-            else:
-                box.label(text="EEVEE 没有 scene.cycles.texture_limit，建议手动缩小图像尺寸。",
-                          icon='ERROR')
+                box.separator()
+            # 破坏性缩小走统一的「贴图强制压缩」向导（EEVEE 没有钳制时唯一出路）
+            box.label(text="直接压缩贴图数据（破坏性，含保存/覆盖确认）：",
+                      icon=_icon('INFO'))
+            box.operator("analyzer.downscale_textures_visn",
+                         text="贴图强制压缩…", icon=_icon('IMAGE'))
         elif item.key == "MAT.normal_map_colorspace":
             op = layout.operator("analyzer.fix_visn",
                                  text="全部改成 Non-Color", icon='CHECKMARK')

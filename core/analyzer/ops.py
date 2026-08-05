@@ -2,7 +2,7 @@
 （合并自 Bekkan/STOOL_part/Analyzer/ops.py，纯平移；仅支持 Blender 5.2，版本门槛已移除）
 """
 import bpy  # type: ignore
-from bpy.props import StringProperty
+from bpy.props import StringProperty, EnumProperty, IntProperty
 
 from . import model, state, fixes
 from .checks import run_quick, run_deep
@@ -352,6 +352,118 @@ class ANALYZER_OT_fix(bpy.types.Operator):
             self.report({'ERROR'}, f"修复失败：{e}")
             return {'CANCELLED'}
         _tag_redraw_all(context)
+        return {'FINISHED'}
+
+
+class ANALYZER_OT_downscale(bpy.types.Operator):
+    """贴图强制压缩：把大贴图数据等比缩小并打包进 .blend（EEVEE 也能用）。
+
+    多步骤向导弹窗（灯光合成面板/工程分析共用同一入口）：
+      0) 检测报告：N 张 >4K / M 张 >2K
+      1) 保存提示（工程脏/未保存时）：先保存才能运行
+      2) 选项：「覆盖原图 / 备份在文件旁边」+「钳制到 4K / 2K」（附耗时提示）
+      3) 覆盖确认：不可逆，建议另存
+    与 ANALYZER_OT_fix 独立，不依赖 findings 列表。
+    """
+    bl_idname = "analyzer.downscale_textures_visn"
+    bl_label = "贴图强制压缩"
+    bl_description = "把大贴图数据等比缩小并打包进 .blend（含保存/覆盖确认）"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: EnumProperty(
+        name="处理方式",
+        items=[
+            ('pack_keep', "备份在文件旁边",
+             "缩小打包前把原图另存 PNG 到 .blend 旁（可恢复，推荐）"),
+            ('pack_delete', "覆盖原图",
+             "缩小打包后原地覆盖磁盘源文件为缩小后的版本（不可撤销）"),
+        ],
+        default='pack_keep',
+    )  # type: ignore
+    size: EnumProperty(
+        name="目标尺寸",
+        items=[
+            ('4096', "钳制到 4K", "长边钳到 4096"),
+            ('2048', "钳制到 2K", "长边钳到 2048"),
+        ],
+        default='2048',
+    )  # type: ignore
+    wizard_step: IntProperty(default=0)  # 0=检测 / 1=保存提示 / 2=选项 / 3=覆盖确认 / 99=执行
+
+    def invoke(self, context, event):
+        # 未保存到磁盘：脚本不负责选路径，直接报错中止（另存/覆盖都需要确定的目标文件夹）
+        if not bpy.data.filepath:
+            self.report({'ERROR'}, "工程尚未保存到磁盘，无法运行；请先保存 .blend 文件再运行。")
+            return {'CANCELLED'}
+        # 计数优先读场景缓存（后台预热已填）；失效才同步重扫一次
+        props = context.scene.analyzer_props
+        cached = fixes.get_downscale_report(props)
+        if cached is None:
+            self.n_gt4k, self.n_gt2k = fixes.count_big_textures()
+            fixes.update_downscale_report(props, self.n_gt4k, self.n_gt2k)
+        else:
+            self.n_gt4k, self.n_gt2k = cached
+        if self.n_gt4k + self.n_gt2k == 0:
+            self.report({'INFO'}, "没有检测到大于 2K 的贴图，无需压缩。")
+            return {'CANCELLED'}
+        self.wizard_step = 0
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        if self.wizard_step == 0:
+            layout.label(
+                text=f"检测到 {self.n_gt4k} 张大于 4K 的贴图、"
+                     f"{self.n_gt2k} 张大于 2K 的贴图。")
+            layout.label(text="压缩会把这些大图等比缩小并嵌入 .blend。")
+        elif self.wizard_step == 1:
+            layout.label(text="需要保存文件之后才能运行，是否保存？")
+        elif self.wizard_step == 2:
+            layout.prop(self, "mode", expand=True)
+            layout.prop(self, "size", expand=True)
+            layout.label(text="转换过程可能需要几分钟，请耐心等待。", icon='INFO')
+        elif self.wizard_step == 3:
+            layout.label(text="覆盖原图不可逆：会用缩小后的版本原地覆盖磁盘源文件，无法用 Ctrl+Z 撤销。")
+            layout.label(text="建议选「备份在文件旁边」；原图一旦被覆盖就找不回来了。")
+
+    def execute(self, context):
+        if self.wizard_step == 0:
+            # 检测报告 → 保存检查（只有工程是脏的（带 *）才提示保存）
+            self.wizard_step = 1 if bpy.data.is_dirty else 2
+            return context.window_manager.invoke_props_dialog(self)
+        if self.wizard_step == 1:
+            # 保存提示 → 保存 → 选项
+            try:
+                bpy.ops.wm.save_mainfile()
+            except Exception as e:
+                self.report({'ERROR'}, f"保存工程失败：{e}")
+                return {'CANCELLED'}
+            self.wizard_step = 2
+            return context.window_manager.invoke_props_dialog(self)
+        if self.wizard_step == 2:
+            if self.mode == 'pack_delete':
+                self.wizard_step = 3
+                return context.window_manager.invoke_props_dialog(self)
+            self.wizard_step = 99
+        elif self.wizard_step == 3:
+            self.wizard_step = 99
+
+        # ── 执行压缩 ──
+        max_size = int(self.size)
+        fixed, skipped, info = fixes.fix_downscale_textures(context, max_size, self.mode)
+        if fixed == 0 and info.get("reason"):
+            self.report({'WARNING'}, info["reason"])
+            return {'CANCELLED'}
+        # 尺寸变了：图片总数没变但计数已过时，置失效让后台预热/下次打开重扫
+        context.scene.analyzer_props.downscale_total = -1
+        tail = f"，已覆盖 {info['overwritten']} 个磁盘源文件" if info.get("overwritten") else ""
+        if info.get("backup_dir"):
+            tail += f"，备份于「{info['backup_dir']}」"
+        self.report({'INFO'}, f"已压缩 {fixed} 张大图到长边 {max_size}，跳过 {skipped} 张{tail}")
+        # 若工程分析已跑过，刷新建议列表（尺寸变了，大贴图条目可能消失）
+        props = context.scene.analyzer_props
+        if getattr(props, 'has_run', False):
+            _rerun_analysis(context)
         return {'FINISHED'}
 
 

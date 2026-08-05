@@ -42,3 +42,7 @@ class AnalyzerProps(bpy.types.PropertyGroup):
         default='IMPACT',
     )  # type: ignore
     states_json: StringProperty(name="标记状态", default="")  # type: ignore
+    # 大贴图计数缓存（随 .blend 保存）：total=扫描时的图片总数，图片数变了即失效
+    downscale_total: IntProperty(name="扫描时图片数", default=-1)  # type: ignore
+    downscale_n4: IntProperty(name="大于4K张数", default=0)  # type: ignore
+    downscale_n2: IntProperty(name="大于2K张数", default=0)  # type: ignore

@@ -5,6 +5,8 @@ skipped 通常表示对象/数据不存在，或不在当前 View Layer 无法�
 所有会修改数据的 operator 都只操作当前 View Layer 内可访问的对象，跨 scene 数据仅静默跳过。
 （合并自 Bekkan/STOOL_part/Analyzer/fixes.py，纯平移）
 """
+import os
+import re
 import bpy  # type: ignore
 
 from . import checks
@@ -527,3 +529,192 @@ def fix_light_perf_toggles(context, item):
             setattr(cyc, name, True)
             fixed += 1
     return fixed, 0, {}
+
+
+# ============================================================
+# 贴图缩小（真缩放数据，EEVEE 无运行时硬钳制时的选择）
+# ============================================================
+
+def _safe_basename(name):
+    """把 datablock 名清洗成可作文件名基的名字（Windows 非法字符 → _）。"""
+    return re.sub(r'[\\/:*?"<>|]', '_', name)
+
+
+def _save_original_copy(img, dest):
+    """把 img 的原始像素写一份 PNG 到 dest。
+
+    用 img.copy() 副本 + 显式 file_format='PNG'：save_render 按 img.file_format
+    决定编码、不依赖扩展名，直接改原图 format 会污染原图属性。
+    """
+    tmp = img.copy()
+    try:
+        tmp.file_format = 'PNG'
+        tmp.save_render(dest)
+    finally:
+        bpy.data.images.remove(tmp)
+
+
+def _overwrite_source_file(img, path):
+    """把 img 当前（已缩小）的像素写回 path，原地覆盖磁盘源文件。
+
+    先写到同目录的临时文件、成功后再 os.replace 原子换入——中途失败（磁盘满/
+    权限）只留下一个 .tmp_downscale 残留，原文件不会被写坏或提前消失。不用
+    img.save()：它按 img.filepath 写，但覆盖场景下 filepath 就是目标路径本身，
+    同名同时读写有风险；save_render 走的是显式传入的临时路径，规避了这一点，
+    并沿用原图 file_format（不强制转 PNG，覆盖场景要保持原扩展名/编码不变）。
+    """
+    tmp_path = path + ".tmp_downscale"
+    try:
+        img.save_render(tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise
+
+
+def count_big_textures():
+    """返回 (大于 4K 的张数, 大于 2K 的张数)，口径与 fix_downscale_textures 一致。
+
+    供向导第一步展示「检测到 N 张…」；大于 2K 含大于 4K（超集）。
+    注意：对未加载进内存的贴图（has_data=False，打包或磁盘皆然）读 img.size 会逐个
+    读文件/打包块（实测约 1.4s/300 张），所以调用方应优先用场景缓存的
+    get_downscale_report()，命中则不必重扫；此函数只在缓存失效时同步跑一次。
+    """
+    n4 = n2 = 0
+    for img in bpy.data.images:
+        if not img or not checks._is_real_image(img):
+            continue
+        if getattr(img, 'library', None) is not None:
+            continue
+        if getattr(img, 'source', '') in {'MOVIE', 'SEQUENCE'}:
+            continue
+        long_side = max(img.size)
+        if long_side > 4096:
+            n4 += 1
+            n2 += 1
+        elif long_side > 2048:
+            n2 += 1
+    return n4, n2
+
+
+def get_downscale_report(props):
+    """读场景缓存的大贴图计数；图片总数没变才算有效，否则返回 None。
+
+    供向导 invoke 与后台预热用：命中就秒出，不用重扫未加载贴图。
+    """
+    if props is None:
+        return None
+    total = getattr(props, 'downscale_total', -1)
+    if total != len(bpy.data.images):
+        return None
+    return getattr(props, 'downscale_n4', 0), getattr(props, 'downscale_n2', 0)
+
+
+def update_downscale_report(props, n4, n2):
+    """把扫描结果写进场景缓存（随 .blend 保存，后台预热也会更新它）。"""
+    if props is None:
+        return
+    props.downscale_total = len(bpy.data.images)
+    props.downscale_n4 = n4
+    props.downscale_n2 = n2
+
+
+def fix_downscale_textures(context, max_size, mode):
+    """把超过 max_size（长边上限）的真贴图数据等比缩小并打包进 .blend。
+
+    EEVEE 没有 scene.cycles.texture_limit 这类运行时硬钳制，只能真的缩放图片数据。
+    mode 由调用方显式传入（向导弹窗/测试），不再读 scene 属性。
+
+    前置条件：工程必须先保存——缩小/备份/删源都涉及文件系统操作，未保存的工程
+    没有确定的 .blend 所在文件夹。Blender 5.2 已移除全局「自动打包」偏好
+    （旧 use_auto_pack 属性），持久化由本工具自身保证：每张缩小的图都强制
+    img.pack() 嵌进 .blend，不依赖任何全局开关。
+
+    mode：
+      'pack_keep'   缩小打包前先把原图另存 PNG 副本到 .blend 文件旁（可恢复，推荐）
+      'pack_delete' 缩小打包后原地覆盖磁盘源文件为缩小后的版本（不可撤销，UI 标「覆盖原图」）
+    返回 (fixed, skipped, info)；info 含 mode/overwritten，失败原因聚在 info['reason']。
+
+    两阶段设计：先收集全部待处理图 + 算完整的 refcount，再统一执行缩放/落盘。
+    不能在同一遍历里边算 refcount 边做覆盖判断——否则共享同一磁盘源文件的两张图，
+    先遍历到的那张会在后一张还没被计入 refcount 时就误判「我是唯一引用者」，
+    抢先覆盖了本该保留（因为后面那张还没缩小）的共享源文件。
+    """
+    blend = bpy.data.filepath
+    if not blend:
+        return 0, 1, {"reason": "工程尚未保存，无法确定 .blend 所在文件夹；"
+                                "请先保存工程再运行贴图强制压缩。"}
+    blend_dir = os.path.dirname(blend)
+    # 备份统一收进 .blend 旁的「贴图备份」子文件夹，避免散在工程根目录
+    backup_dir = os.path.join(blend_dir, "贴图备份") if mode == 'pack_keep' else ""
+
+    # ---- 阶段一：只读遍历，收集目标 + 算完整 refcount，不做任何落盘/缩放 ----
+    targets = []  # [(img, nw, nh, src_path), ...]
+    skipped = 0
+    refcount = {}  # abspath -> 引用它的 Image 数（共享源文件保护）
+
+    for img in bpy.data.images:
+        if not img or not checks._is_real_image(img):
+            continue
+        if getattr(img, 'library', None) is not None:
+            skipped += 1
+            continue
+        if getattr(img, 'source', '') in {'MOVIE', 'SEQUENCE'}:
+            skipped += 1
+            continue
+        w, h = img.size
+        long_side = max(w, h)
+        if long_side <= max_size:
+            continue  # 已达标，既不计 fixed 也不计 skipped（单次运行天然幂等）
+        scale = max_size / long_side
+        nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+
+        src_path = ""
+        if getattr(img, 'source', '') == 'FILE' and img.filepath:
+            src_path = bpy.path.abspath(img.filepath)
+            if src_path and os.path.isfile(src_path):
+                refcount[src_path] = refcount.get(src_path, 0) + 1
+        targets.append((img, nw, nh, src_path))
+
+    # ---- 阶段二：refcount 已完整，逐张缩放/打包/落盘 ----
+    fixed = overwritten = 0
+    reasons = []
+
+    for img, nw, nh, src_path in targets:
+        try:
+            if mode == 'pack_keep':
+                try:
+                    os.makedirs(backup_dir, exist_ok=True)
+                except Exception:
+                    pass
+                base = (os.path.splitext(os.path.basename(src_path))[0]
+                        or _safe_basename(img.name))
+                dest = os.path.join(backup_dir, f"{base}_原图.png")
+                n = 1
+                while os.path.exists(dest):
+                    dest = os.path.join(backup_dir, f"{base}_原图_{n}.png")
+                    n += 1
+                _save_original_copy(img, dest)
+            img.scale(nw, nh)
+            if hasattr(img, 'update'):
+                img.update()
+            img.pack()
+            if mode == 'pack_delete' and src_path and os.path.isfile(src_path) \
+                    and refcount.get(src_path, 0) <= 1:
+                _overwrite_source_file(img, src_path)
+                overwritten += 1
+            fixed += 1
+        except Exception as e:
+            skipped += 1
+            reasons.append(f"{img.name}: {e}")
+
+    info = {"mode": mode, "overwritten": overwritten}
+    if backup_dir:
+        info["backup_dir"] = backup_dir
+    if reasons:
+        info["reason"] = "；".join(reasons[:5]) + ("…" if len(reasons) > 5 else "")
+    return fixed, skipped, info
