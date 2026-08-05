@@ -188,10 +188,14 @@ class RENDER_OT_create_presets(Operator):
         props.resolution_x = render.resolution_x
         props.resolution_y = render.resolution_y
 
-        # 采样数设置在 scene.cycles / scene.eevee 上，而非 RenderSettings
-        if hasattr(context.scene, 'cycles'):
+        # 采样数设置在 scene.cycles / scene.eevee 上，而非 RenderSettings。
+        # scene.cycles / scene.eevee 是常驻 PointerProperty，永不为 None，
+        # 判断引擎必须看 render.engine（旧写法用 hasattr，EEVEE 下也会先命中
+        # cycles 分支、读错采样值）。
+        engine = (getattr(render, 'engine', None) or '').upper()
+        if engine.endswith('CYCLES'):
             props.samples = context.scene.cycles.samples
-        elif hasattr(context.scene, 'eevee'):
+        elif 'EEVEE' in engine:
             props.samples = context.scene.eevee.taa_render_samples
 
         props.frame_start = context.scene.frame_start
@@ -208,30 +212,8 @@ class RENDER_OT_create_presets(Operator):
         layout = self.layout
         props = context.scene.render_preset_settings
 
-        # Resolution
-        col = layout.column(align=True)
-        col.label(text="最终渲染设置 (Final):")
-        row = col.row(align=True)
-        row.prop(props, "resolution_x", text="X")
-        row.prop(props, "resolution_y", text="Y")
-
-        # 采样设置
-        layout.separator()
-        layout.prop(props, "samples", text="采样数")
-
-        # 帧范围设置
-        layout.separator()
-        col = layout.column(align=True)
-        col.label(text="帧范围:")
-        row = col.row(align=True)
-        row.prop(props, "frame_start", text="开始")
-        row.prop(props, "frame_end", text="结束")
-        layout.separator()
-        layout.label(text="帧步长:")
-        layout.prop(props, "frame_step", text="步长")
-
-        # Paths
-        layout.separator()
+        # 分辨率/采样数/帧范围/步长全部自动读取当前场景值（见 invoke），
+        # 不在这里展示为可编辑项；弹窗只需要选缓存路径。
         layout.prop(props, "absolute_path", text="绝对路径")
         layout.prop(props, "relative_path",
                     text="相对路径 (必须以 // 开头)")

@@ -13,6 +13,10 @@ class BEKKAN_PT_lightdesk(POND_PT_lightdesk):
     bl_label = "灯光台"
     bl_category = "别馆"
     bl_parent_id = ""  # 顶层独立面板（Blender 5.2 的 bl_parent_id 不支持 None，空串 = 无父）
+    # POND_PT_lightdesk 的 bl_order=3 是相对 POND_PT_sec_look 子面板排的，子类化会
+    # 继承这个值；別馆顶层面板靠注册顺序排列（其它顶层面板都没设 bl_order，默认 0），
+    # 继承来的 3 会把本面板排到所有默认值面板之后（连颈椎拯救者也排前面），必须清零。
+    bl_order = 0
 
 
 _classes = (
