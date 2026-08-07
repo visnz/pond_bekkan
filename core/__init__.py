@@ -4,13 +4,13 @@
 from . import (snapshot, hierarchy, stage, anime, render_preset, texture,
                organize, lumen, synccheck, c4d_bridge, preset_lib, version,
                palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
-               renderlayers, analyzer)
+               renderlayers, analyzer, outline)
 
 _MODULES = (
     snapshot, hierarchy, stage, anime, render_preset, texture,
     organize, lumen, synccheck, c4d_bridge, preset_lib, version,
     palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
-    renderlayers, analyzer,
+    renderlayers, analyzer, outline,
 )
 
 

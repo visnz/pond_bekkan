@@ -258,6 +258,29 @@ class POND_OT_sync_undo(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _walk_back_tex_images(socket, depth=0, _max_depth=16):
+    """从一个输入插槽顺着 links 往前找所有能追溯到的 TEX_IMAGE 贴图。
+
+    支持中间隔着任意层 Mix/Math/Reroute 之类的节点（比如混合两张法线贴图后
+    再接进「法线贴图」节点的 Color 输入），只在同一棵 node_tree 内走、不跨
+    节点组边界；深度设上限只是防御性保护（Blender 本身不允许连线成环，
+    正常节点图不会触发）。跟 core/analyzer/checks.py 的同名函数是同一套算法，
+    这边自包含一份是因为两个模块不互相 import。
+    """
+    if depth > _max_depth:
+        return []
+    found = []
+    for link in socket.links:
+        src = link.from_node
+        if src.type == "TEX_IMAGE":
+            if src.image:
+                found.append(src.image)
+            continue
+        for inp in src.inputs:
+            found.extend(_walk_back_tex_images(inp, depth + 1, _max_depth))
+    return found
+
+
 def _scan_normal_images():
     """找出该是 Non-Color 却不是的法线贴图。返回 {image名: 出处}"""
     bad = {}
@@ -267,11 +290,12 @@ def _scan_normal_images():
         for node in mat.node_tree.nodes:
             if node.type != "NORMAL_MAP":
                 continue
-            for link in node.inputs["Color"].links:
-                src = link.from_node
-                if src.type == "TEX_IMAGE" and src.image and \
-                        src.image.colorspace_settings.name != "Non-Color":
-                    bad.setdefault(src.image.name, f"接在「{mat.name}」的法线节点上")
+            color_input = node.inputs.get("Color")
+            if color_input is None:
+                continue
+            for img in _walk_back_tex_images(color_input):
+                if img.colorspace_settings.name != "Non-Color":
+                    bad.setdefault(img.name, f"接在「{mat.name}」的法线节点上")
     for img in bpy.data.images:
         if img.library or img.name in bad:
             continue
