@@ -9,6 +9,7 @@ MODULES = [
     ("show_texture", "贴图索引"),
     ("show_anime", "动画类"),
     ("show_render_preset", "渲染预设"),
+    ("show_toon_outline", "三渲二"),
     ("show_addonmanager", "颈椎拯救者"),
 ]
 

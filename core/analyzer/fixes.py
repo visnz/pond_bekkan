@@ -109,7 +109,9 @@ def fix_normal_map_colorspace(context, item):
 
     算法与 core/synccheck.py 的 POND_OT_normal_fix 一致（应用户要求复用蛙灾侧
     已验证的修复逻辑），改成自包含实现的原因见 checks.check_normal_map_colorspace
-    的说明——独立版打包不带 core/synccheck.py，不能跨模块 import。
+    的说明——独立版打包不带 core/synccheck.py，不能跨模块 import。节点连线部分
+    复用 checks._walk_back_tex_images 支持多跳追溯（比如混合两张法线贴图后再接
+    进本节点），跟检测阶段用同一套遍历逻辑，避免检测/修复两边各写一份导致分叉。
     """
     fixed = 0
     seen = set()
@@ -122,11 +124,7 @@ def fix_normal_map_colorspace(context, item):
             color_input = node.inputs.get('Color')
             if color_input is None:
                 continue
-            for link in color_input.links:
-                src = link.from_node
-                if src.type != 'TEX_IMAGE' or not src.image:
-                    continue
-                img = src.image
+            for img in checks._walk_back_tex_images(color_input):
                 if img.name in seen or img.colorspace_settings.name == 'Non-Color':
                     continue
                 seen.add(img.name)
@@ -136,6 +134,82 @@ def fix_normal_map_colorspace(context, item):
                 except Exception:
                     pass
     return fixed, 0, {}
+
+
+# 与 core/synccheck.py 的 _NORMAL_NAME 保持完全一致的正则——那是蛙灾侧已验证的
+# 名称启发式规则，两边各自自包含实现（独立版不能跨模块 import），但匹配规则本身
+# 必须对齐，否则同一份场景在两个模式下检测结果会不一致（当年 checks.py 特意选择
+# 不搬这条规则就是为了避免这种分叉，这次按用户要求补回来，所以直接照抄原规则）。
+_NORMAL_NAME_RE = re.compile(r"(normal|_nor(?:[_.\b-]|$)|_nrm|nor_?gl)", re.I)
+
+
+def _looks_like_normal_name(name):
+    return bool(_NORMAL_NAME_RE.search(name))
+
+
+def _images_wired_into_normal_map_node():
+    """精确检测覆盖到的贴图名集合：追溯到「法线贴图」节点 Color 输入上的 TEX_IMAGE。
+
+    遍历范围/条件与 fix_normal_map_colorspace 完全一致（同样用
+    checks._walk_back_tex_images 多跳追溯），供 find_normal_named_review_images
+    排除已被精确修复处理过的贴图，避免重复提示。
+    """
+    names = set()
+    for mat in bpy.data.materials:
+        if not mat or not mat.use_nodes or mat.library or not mat.node_tree:
+            continue
+        for node in mat.node_tree.nodes:
+            if node.type != 'NORMAL_MAP':
+                continue
+            color_input = node.inputs.get('Color')
+            if color_input is None:
+                continue
+            for img in checks._walk_back_tex_images(color_input):
+                names.add(img.name)
+    return names
+
+
+def find_normal_named_review_images(context):
+    """按贴图名称找疑似法线贴图、但没被精确检测（追溯到「法线贴图」节点）抓到的贴图。
+
+    只按名称做启发式判断，正则跟 core/synccheck.py 的 _NORMAL_NAME 完全一致——
+    用于兜底一些复杂节点图（比如手动跟 Geometry 的 Normal 混合、或 BSDF 的 Normal
+    输入接在节点组里）导致精确检测漏检的情况。扫描范围是全部 bpy.data.images
+    （跟蛙灾侧 _scan_normal_images 同一个扫描范围，不限定材质节点树里用到的贴图，
+    因为按名字兜底本来就是「不确定有没有用在 shader 里」的补充检查）。只是命中
+    名称关键字，不代表一定该用 Non-Color，调用方应作为「需要用户确认」的候选
+    列表，不要直接自动改。
+    """
+    precise = _images_wired_into_normal_map_node()
+    candidates = []
+    for img in bpy.data.images:
+        if img.library or img.name in precise:
+            continue
+        if img.colorspace_settings.name == 'Non-Color':
+            continue
+        if not _looks_like_normal_name(img.name):
+            continue
+        candidates.append(img.name)
+    return sorted(candidates)
+
+
+def set_images_colorspace_noncolor(image_names):
+    """把指定名称的贴图色彩空间批量设为 Non-Color，返回实际改动数量。
+
+    供「按名称启发式复核」确认后的批量应用，image_names 通常来自
+    find_normal_named_review_images 的返回值。
+    """
+    fixed = 0
+    for name in image_names:
+        img = bpy.data.images.get(name)
+        if img is None or img.colorspace_settings.name == 'Non-Color':
+            continue
+        try:
+            img.colorspace_settings.name = 'Non-Color'
+            fixed += 1
+        except Exception:
+            pass
+    return fixed
 
 
 def fix_cap_subdivision(context, item, max_level):

@@ -984,6 +984,28 @@ def check_material_images(context):
     )
 
 
+def _walk_back_tex_images(socket, depth=0, _max_depth=16):
+    """从一个输入插槽顺着 links 往前找所有能追溯到的 TEX_IMAGE 贴图。
+
+    支持中间隔着任意层 Mix/Math/Reroute 之类的节点（比如混合两张法线贴图后
+    再接进「法线贴图」节点的 Color 输入），只在同一棵 node_tree 内走、不跨
+    节点组边界；深度设上限只是防御性保护（Blender 本身不允许连线成环，
+    正常节点图不会触发，只是避免极端复杂图卡死）。
+    """
+    if depth > _max_depth:
+        return []
+    found = []
+    for link in socket.links:
+        src = link.from_node
+        if src.type == 'TEX_IMAGE':
+            if src.image:
+                found.append(src.image)
+            continue
+        for inp in src.inputs:
+            found.extend(_walk_back_tex_images(inp, depth + 1, _max_depth))
+    return found
+
+
 def check_normal_map_colorspace(context):
     """检测接在「法线贴图」节点上的贴图是否设为 Non-Color 色彩空间。
 
@@ -991,8 +1013,10 @@ def check_normal_map_colorspace(context):
     蛙灾侧已验证的检测逻辑），但不直接 import 那个模块——core/analyzer 独立版
     打包时只带 core/analyzer/ 一个目录（build.py 的 _iter_analyzer_source_files），
     跨到 core/synccheck.py 的 import 会让独立版一加载就 ModuleNotFoundError，
-    这里改成同算法的自包含实现，只检测节点连线（不做按名字猜测的兜底，
-    避免独立实现和原版行为在边界情况上悄悄分叉）。
+    这里改成同算法的自包含实现。节点连线部分用 _walk_back_tex_images 支持多跳
+    追溯（比如混合两张法线贴图后再接进本节点），按名字猜测的兜底见
+    fixes.find_normal_named_review_images（单独走二次确认流程，不在这里合并，
+    避免猜测结果直接进 Finding 列表造成误导）。
     """
     bad = {}
     for mat in bpy.data.materials:
@@ -1004,11 +1028,9 @@ def check_normal_map_colorspace(context):
             color_input = node.inputs.get('Color')
             if color_input is None:
                 continue
-            for link in color_input.links:
-                src = link.from_node
-                if src.type == 'TEX_IMAGE' and src.image and \
-                        src.image.colorspace_settings.name != 'Non-Color':
-                    bad.setdefault(src.image.name, mat.name)
+            for img in _walk_back_tex_images(color_input):
+                if img.colorspace_settings.name != 'Non-Color':
+                    bad.setdefault(img.name, mat.name)
     if not bad:
         return None
     names = sorted(bad)

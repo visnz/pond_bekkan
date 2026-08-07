@@ -6,7 +6,7 @@
 import bpy
 
 from . import (snapshot_panel, analyzer_panel, light_compose_panel,
-               lightdesk_panel, panels, addonmanager_panel)
+               lightdesk_panel, panels, outline_panel, addonmanager_panel)
 from ...core import addonmanager as _am_core
 
 
@@ -16,6 +16,7 @@ def register():
     light_compose_panel.register()
     lightdesk_panel.register()
     panels.register()
+    outline_panel.register()
     _am_core.register()
     addonmanager_panel.register()
 
@@ -24,6 +25,7 @@ def unregister():
     # 先恢复被管理器移动过的面板，再注销本模式 UI
     addonmanager_panel.unregister()
     _am_core.unregister()
+    outline_panel.unregister()
     panels.unregister()
     lightdesk_panel.unregister()
     light_compose_panel.unregister()

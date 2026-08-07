@@ -11,7 +11,8 @@ from .ops import (ANALYZER_OT_run, ANALYZER_OT_select,
                   ANALYZER_OT_copy_names,
                   ANALYZER_OT_toggle_mark,
                   ANALYZER_OT_clear_marks, ANALYZER_OT_fix,
-                  ANALYZER_OT_export_report, ANALYZER_OT_downscale)
+                  ANALYZER_OT_export_report, ANALYZER_OT_downscale,
+                  ANALYZER_OT_fix_normal_colorspace)
 
 _CLASSES = [
     FindingItem,            # 先于 AnalyzerProps（CollectionProperty 引用的类型）
@@ -24,6 +25,7 @@ _CLASSES = [
     ANALYZER_OT_fix,
     ANALYZER_OT_export_report,
     ANALYZER_OT_downscale,
+    ANALYZER_OT_fix_normal_colorspace,
 ]
 
 

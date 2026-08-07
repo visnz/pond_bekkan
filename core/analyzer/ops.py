@@ -2,7 +2,7 @@
 （合并自 Bekkan/STOOL_part/Analyzer/ops.py，纯平移；仅支持 Blender 5.2，版本门槛已移除）
 """
 import bpy  # type: ignore
-from bpy.props import StringProperty, EnumProperty, IntProperty
+from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty
 
 from . import model, state, fixes
 from .checks import run_quick, run_deep
@@ -211,6 +211,38 @@ class ANALYZER_OT_fix(bpy.types.Operator):
 
     key: StringProperty(name="建议标识")  # type: ignore
     option: StringProperty(name="修复选项", default="")  # type: ignore
+    also_fix_review: BoolProperty(
+        name="一并改成 Non-Color",
+        description="把下列按名称疑似法线贴图、但未接在标准「法线贴图」节点上的贴图也改成 Non-Color",
+        default=False,
+    )  # type: ignore
+
+    _review_candidates = None
+
+    def invoke(self, context, event):
+        # 只有 MAT.normal_map_colorspace 这一条会弹二次确认弹窗；其余分支保持
+        # 原有「点击即执行」行为不变（等价于没定义 invoke() 时的默认表现）。
+        if self.key == "MAT.normal_map_colorspace":
+            self._review_candidates = fixes.find_normal_named_review_images(context)
+            if self._review_candidates:
+                self.also_fix_review = False
+                return context.window_manager.invoke_props_dialog(self, width=420)
+        return self.execute(context)
+
+    def draw(self, context):
+        layout = self.layout
+        cands = self._review_candidates or []
+        if self.key != "MAT.normal_map_colorspace" or not cands:
+            return  # 其余分支/无候选：不显示额外 UI（重做面板留空即可）
+        layout.label(text=f"另外发现 {len(cands)} 张贴图名称疑似法线贴图，"
+                          "但未接在标准「法线贴图」节点上：")
+        col = layout.column()
+        for name in cands[:10]:
+            col.label(text=f"· {name}", icon='IMAGE_DATA')
+        if len(cands) > 10:
+            col.label(text=f"…以及另外 {len(cands) - 10} 张")
+        layout.prop(self, "also_fix_review")
+        layout.label(text="不是所有同名贴图都需要 Non-Color，请确认后再勾选。", icon='INFO')
 
     def execute(self, context):
         props = context.scene.analyzer_props
@@ -238,7 +270,18 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                            f"（否则该限制不会生效），跳过 {skipped} 项")
             elif item.key == "MAT.normal_map_colorspace":
                 fixed, skipped, info = fixes.fix_normal_map_colorspace(context, item)
-                self.report({'INFO'}, f"已把 {fixed} 张贴图的色彩空间改成 Non-Color")
+                extra = 0
+                if self.also_fix_review:
+                    cands = self._review_candidates
+                    if cands is None:
+                        cands = fixes.find_normal_named_review_images(context)
+                    extra = fixes.set_images_colorspace_noncolor(cands)
+                if extra:
+                    self.report({'INFO'},
+                               f"已把 {fixed} 张贴图改成 Non-Color，"
+                               f"另按名称确认追加 {extra} 张")
+                else:
+                    self.report({'INFO'}, f"已把 {fixed} 张贴图的色彩空间改成 Non-Color")
             elif item.key == "GEOM.subdivision_high":
                 max_level = _int_option(self, 2)
                 fixed, skipped, info = fixes.fix_cap_subdivision(context, item, max_level)
@@ -518,6 +561,70 @@ def _build_markdown(context, props):
         lines.append("")
 
     return "\n".join(lines)
+
+
+class ANALYZER_OT_fix_normal_colorspace(bpy.types.Operator):
+    """独立入口：把接在「法线贴图」节点上的贴图色彩空间统一改成 Non-Color。
+
+    与 ANALYZER_OT_fix 的 MAT.normal_map_colorspace 分支调用同一个
+    fixes.fix_normal_map_colorspace，但不依赖 findings 列表——灯光合成面板
+    单独放一个按钮，不用先跑一遍工程分析才能用（同 ANALYZER_OT_downscale 的先例）。
+
+    精确修复跑完之后，再按名称启发式扫一遍没被抓到、但名字像法线贴图的图
+    （find_normal_named_review_images），如果有就弹窗追问是否一并改成
+    Non-Color——不是所有 normal 命名的贴图都该用 Non-Color，这一批只提示、
+    不强制自动改。
+    """
+    bl_idname = "analyzer.fix_normal_colorspace_visn"
+    bl_label = "修复法线贴图色彩空间"
+    bl_description = "把所有接在「法线贴图」节点上的贴图色彩空间统一改成 Non-Color"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    also_fix_review: BoolProperty(
+        name="一并改成 Non-Color",
+        description="把下列按名称疑似法线贴图、但未接在标准「法线贴图」节点上的贴图也改成 Non-Color",
+        default=False,
+    )  # type: ignore
+
+    _review_candidates = None
+
+    def invoke(self, context, event):
+        self._review_candidates = fixes.find_normal_named_review_images(context)
+        if not self._review_candidates:
+            return self.execute(context)
+        self.also_fix_review = False
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        cands = self._review_candidates or []
+        layout.label(text=f"另外发现 {len(cands)} 张贴图名称疑似法线贴图，"
+                          "但未接在标准「法线贴图」节点上：")
+        col = layout.column()
+        for name in cands[:10]:
+            col.label(text=f"· {name}", icon='IMAGE_DATA')
+        if len(cands) > 10:
+            col.label(text=f"…以及另外 {len(cands) - 10} 张")
+        layout.prop(self, "also_fix_review")
+        layout.label(text="不是所有同名贴图都需要 Non-Color，请确认后再勾选。", icon='INFO')
+
+    def execute(self, context):
+        fixed, _skipped, _info = fixes.fix_normal_map_colorspace(context, None)
+        extra = 0
+        if self.also_fix_review:
+            cands = self._review_candidates
+            if cands is None:
+                cands = fixes.find_normal_named_review_images(context)
+            extra = fixes.set_images_colorspace_noncolor(cands)
+        total = fixed + extra
+        if total == 0:
+            self.report({'INFO'}, "没有需要修复的法线贴图，色彩空间都已是 Non-Color")
+        elif extra:
+            self.report({'INFO'},
+                       f"已把 {fixed} 张贴图改成 Non-Color，另按名称确认追加 {extra} 张")
+        else:
+            self.report({'INFO'}, f"已把 {fixed} 张贴图的色彩空间改成 Non-Color")
+        return {'FINISHED'}
 
 
 class ANALYZER_OT_export_report(bpy.types.Operator):
