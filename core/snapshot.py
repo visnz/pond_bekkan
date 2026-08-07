@@ -24,6 +24,7 @@ import blf
 import numpy as np
 from gpu_extras.batch import batch_for_shader
 from bpy.app.handlers import persistent
+from bpy_extras.view3d_utils import location_3d_to_region_2d
 
 # 画回 shader 是否做 sRGB 预解码（校准开关，见文件头标定记录）
 _DRAW_DECODE_SRGB = True
@@ -134,13 +135,44 @@ def _srgb_decode(rgb):
     return np.where(rgb <= 0.04045, rgb / 12.92, np.power((rgb + 0.055) / 1.055, 2.4))
 
 
+def _passepartout_mask(context, space, region, rv3d):
+    """算出当前摄像机遮罩需要压黑的矩形（region 像素坐标）与透明度。
+
+    不在摄像机视角/摄像机没开遮罩/取景框投影失败时返回 None（不遮罩，维持原样）。
+    取景框算法：camera.view_frame 拿本地空间 4 角点 -> matrix_world 变换到世界坐标
+    -> location_3d_to_region_2d 投影到 region 像素坐标，取 min/max 即矩形，自动适配
+    Sensor Fit 造成的 letterbox/pillarbox。
+    """
+    if getattr(rv3d, "view_perspective", None) != "CAMERA":
+        return None
+    cam_obj = space.camera if getattr(space, "use_local_camera", False) else context.scene.camera
+    if cam_obj is None or cam_obj.data is None or not getattr(cam_obj.data, "show_passepartout", False):
+        return None
+    try:
+        frame = cam_obj.data.view_frame(scene=context.scene)
+        mat = cam_obj.matrix_world
+        pts = [location_3d_to_region_2d(region, rv3d, mat @ corner) for corner in frame]
+        if any(p is None for p in pts):
+            return None
+    except Exception:
+        return None
+    xs = [p.x for p in pts]
+    ys = [p.y for p in pts]
+    x0 = max(0, min(region.width, round(min(xs))))
+    x1 = max(0, min(region.width, round(max(xs))))
+    y0 = max(0, min(region.height, round(min(ys))))
+    y1 = max(0, min(region.height, round(max(ys))))
+    return x0, y0, x1, y1, cam_obj.data.passepartout_alpha
+
+
 def _capture_offscreen(context, area, space, region):
     """离屏重画当前视口并转为 RGBA8 纹理。
     draw_view3d 一次同步渲出全部采样（EEVEE 无采样竞态，比旧延时截图更可靠）；
     do_color_management=True 的 float 输出只含视图变换、不含最终 EOTF（5.2 实测：
     捕获值 C = srgb_dec(屏幕字节 D)），存储语义与渲染 PNG 加载后的线性像素一致，
     画回侧的预解码（_DRAW_DECODE_SRGB）以此为基准。面板等 region UI 天然不入镜。
-    大场景拍摄会同步阻塞，属预期"""
+    摄像机遮罩（Passepartout）是交互视口另外画的 2D 引导层，draw_view3d 不会带出来，
+    这里额外读一次遮罩矩形手动压黑做后处理补上。大场景拍摄会同步阻塞，属预期"""
     w, h = int(region.width), int(region.height)
     rv3d = space.region_3d
     # 离屏必须 RGBA32F：其 read() 返回 FLOAT Buffer，可直接喂 GPUTexture
@@ -152,7 +184,15 @@ def _capture_offscreen(context, area, space, region):
                             do_color_management=True)
         buf = off.texture_color.read()
         buf.dimensions = w * h * 4
-        tex = gpu.types.GPUTexture((w, h), format="RGBA8", data=buf)  # 内部量化，零 numpy
+        mask = _passepartout_mask(context, space, region, rv3d)
+        if mask is not None:
+            x0, y0, x1, y1, alpha = mask
+            arr = np.array(buf, dtype=np.float32).reshape(h, w, 4)
+            keep = np.zeros((h, w), dtype=bool)
+            keep[y0:y1, x0:x1] = True
+            arr[~keep, :3] *= (1.0 - alpha)
+            buf = gpu.types.Buffer("FLOAT", w * h * 4, arr)
+        tex = gpu.types.GPUTexture((w, h), format="RGBA8", data=buf)  # 内部量化
     finally:
         off.free()  # GPUOffScreen 必须显式释放；GPUTexture 无 free()，靠解除引用 + GC
     return tex, w, h
