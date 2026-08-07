@@ -236,6 +236,13 @@ class CAMERA_OT_create_focus_object(bpy.types.Operator):
         cam.data.dof.focus_object = focus
         cam.data.show_passepartout = True
         cam.data.passepartout_alpha = 1.0
+        # 关键：parent_no_inverse_set 会把「选中物」绑定到「活跃物体」上——
+        # 先取消现有选中，再激活并选中场景摄像机，焦点空物才会被绑到摄像机下面；
+        # 之前没这一步，它被绑到了点击按钮时正选中的那个物体上。
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        context.view_layer.objects.active = cam
+        cam.select_set(True)
         focus.select_set(True)
         bpy.ops.object.parent_no_inverse_set(keep_transform=True)
         focus.select_set(False)
