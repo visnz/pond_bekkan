@@ -243,6 +243,9 @@ def _draw(area_id):
             sh, "TRI_FAN",
             {"pos": verts,
              "texCoord": ((p, 0), (1, 0), (1, 1), (p, 1))})
+        # 显式关掉深度测试：POST_PIXEL 覆盖层必须永远盖在 3D 场景之上，
+        # 不能假设上一步（比如 EEVEE 真实阴影管线）帮忙复原好了深度测试状态
+        gpu.state.depth_test_set("NONE")
         gpu.state.blend_set("ALPHA")
         sh.bind()
         sh.uniform_sampler("image", rec["tex"])
