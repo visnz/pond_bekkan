@@ -387,6 +387,11 @@ class ANALYZER_OT_fix(bpy.types.Operator):
                 self.report({'INFO'}, msg)
                 if fixed:
                     _rerun_analysis(context)
+            elif item.key == "MAT.unlinked_packed_images":
+                fixed, skipped, info = fixes.fix_remove_unlinked_packed_images(context, item)
+                self.report({'INFO'}, f"已清除 {fixed} 张贴图，跳过 {skipped} 张")
+                if fixed:
+                    _rerun_analysis(context)
             else:
                 self.report({'WARNING'}, "该条建议暂无自动修复")
                 return {'CANCELLED'}
@@ -428,6 +433,8 @@ class ANALYZER_OT_downscale(bpy.types.Operator):
         items=[
             ('4096', "钳制到 4K", "长边钳到 4096"),
             ('2048', "钳制到 2K", "长边钳到 2048"),
+            ('1024', "钳制到 1K", "长边钳到 1024"),
+            ('512', "钳制到 512", "长边钳到 512"),
         ],
         default='2048',
     )  # type: ignore
@@ -442,12 +449,13 @@ class ANALYZER_OT_downscale(bpy.types.Operator):
         props = context.scene.analyzer_props
         cached = fixes.get_downscale_report(props)
         if cached is None:
-            self.n_gt4k, self.n_gt2k = fixes.count_big_textures()
-            fixes.update_downscale_report(props, self.n_gt4k, self.n_gt2k)
+            self.n_gt4k, self.n_gt2k, self.n_gt1k, self.n_gt512 = fixes.count_big_textures()
+            fixes.update_downscale_report(props, self.n_gt4k, self.n_gt2k, self.n_gt1k, self.n_gt512)
         else:
-            self.n_gt4k, self.n_gt2k = cached
-        if self.n_gt4k + self.n_gt2k == 0:
-            self.report({'INFO'}, "没有检测到大于 2K 的贴图，无需压缩。")
+            self.n_gt4k, self.n_gt2k, self.n_gt1k, self.n_gt512 = cached
+        # 只要没有比可选的最小档（512）更大的贴图，选哪档都不会有任何效果
+        if self.n_gt512 == 0:
+            self.report({'INFO'}, "没有检测到大于 512 的贴图，无需压缩。")
             return {'CANCELLED'}
         self.wizard_step = 0
         return context.window_manager.invoke_props_dialog(self)
@@ -456,8 +464,8 @@ class ANALYZER_OT_downscale(bpy.types.Operator):
         layout = self.layout
         if self.wizard_step == 0:
             layout.label(
-                text=f"检测到 {self.n_gt4k} 张大于 4K 的贴图、"
-                     f"{self.n_gt2k} 张大于 2K 的贴图。")
+                text=f"检测到 {self.n_gt4k} 张大于 4K、{self.n_gt2k} 张大于 2K、"
+                     f"{self.n_gt1k} 张大于 1K、{self.n_gt512} 张大于 512 的贴图。")
             layout.label(text="压缩会把这些大图等比缩小并嵌入 .blend。")
         elif self.wizard_step == 1:
             layout.label(text="需要保存文件之后才能运行，是否保存？")

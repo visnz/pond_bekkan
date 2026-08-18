@@ -46,3 +46,5 @@ class AnalyzerProps(bpy.types.PropertyGroup):
     downscale_total: IntProperty(name="扫描时图片数", default=-1)  # type: ignore
     downscale_n4: IntProperty(name="大于4K张数", default=0)  # type: ignore
     downscale_n2: IntProperty(name="大于2K张数", default=0)  # type: ignore
+    downscale_n1: IntProperty(name="大于1K张数", default=0)  # type: ignore
+    downscale_n512: IntProperty(name="大于512张数", default=0)  # type: ignore

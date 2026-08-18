@@ -984,6 +984,66 @@ def check_material_images(context):
     )
 
 
+def check_unlinked_packed_images(context):
+    """已打包进 .blend（占用文件体积）却没有真正参与任何材质/世界渲染的贴图。
+
+    只看两种「白占空间」的情况，且只统计 img.packed_file 存在的（真正占 .blend
+    体积；只是链接了外部磁盘文件、没打包进来的不算）：
+      1. 贴图节点（材质或世界的 Shader Editor 里）引用了这张图，但节点的输出
+         一个都没接出去——对应用户在 Shader Editor 里「导入了但没链接」的场景。
+      2. 压根没被任何材质/世界节点树里的贴图节点引用（可能是节点被删掉之后
+         留下的、靠 Fake User 或其它引用撑着没被判定成孤儿数据的图）。
+    真正的孤儿（users == 0）已经由 check_orphan_data / DATA.orphans 覆盖，
+    这里不重复统计，只抓「有引用但引用是摆设」这个之前没人管的缝。
+
+    范围限制：只扫材质和世界的节点树（对应「shader 面板」），不含合成器/几何
+    节点里的贴图引用——这两处目前不在检测范围内，是已知限制。
+    """
+    referenced = set()
+    linked = set()
+    for tree_owner in list(bpy.data.materials) + list(bpy.data.worlds):
+        if not tree_owner or not getattr(tree_owner, 'use_nodes', False) or \
+                tree_owner.library or not tree_owner.node_tree:
+            continue
+        for node in tree_owner.node_tree.nodes:
+            if node.type != 'TEX_IMAGE' or not node.image:
+                continue
+            referenced.add(node.image.name)
+            if any(out.is_linked for out in node.outputs):
+                linked.add(node.image.name)
+
+    bad = []
+    for img in bpy.data.images:
+        if not img or not _is_real_image(img):
+            continue
+        if getattr(img, 'library', None) is not None:
+            continue
+        if not img.packed_file:
+            continue
+        if img.name in linked:
+            continue
+        reason = "贴图节点没有连接到任何地方" if img.name in referenced else "没有被任何材质/世界节点引用"
+        bad.append((img, reason))
+    if not bad:
+        return None
+
+    bad.sort(key=lambda t: -(t[0].size[0] * t[0].size[1]))
+    names_for_fix = [img.name for img, _ in bad]
+    lines = [f"{img.name} ({img.size[0]}×{img.size[1]}) —— {reason}" for img, reason in bad[:20]]
+    if len(bad) > 20:
+        lines.append(f"…以及另外 {len(bad) - 20} 张")
+
+    return Finding(
+        "MAT.unlinked_packed_images", "已打包但未在材质中链接使用的贴图", len(bad),
+        IMPACT_LOW, EASE_HALF,
+        f"{len(bad)} 张贴图已打包进 .blend（占用文件体积），但没有真正参与任何材质/"
+        "世界的渲染——有的是贴图节点没接到任何地方，有的是压根没被节点引用。",
+        "建议：确认这些贴图确实不需要后，点击「清除」删除数据块以减小工程体积；"
+        "如果只是暂时没连线、以后还要用，先手动检查后再决定。\n" + "\n".join(lines),
+        CATEGORY_MATERIAL, names_for_fix,
+    )
+
+
 def _walk_back_tex_images(socket, depth=0, _max_depth=16):
     """从一个输入插槽顺着 links 往前找所有能追溯到的 TEX_IMAGE 贴图。
 
@@ -1054,18 +1114,23 @@ def check_big_textures(context):
     与「Cycles 贴图尺寸未做视口/渲染钳制」原本是两个独立检查项，但对使用者来说
     两者说的是同一件事（贴图太大），只是严重程度/处理难度不同——合并成一条，
     只在确实存在过大贴图时才提「顺手把钳制也打开」，避免用户在列表里看到两条
-    重复的「贴图太大」提醒却要分别去理解和处理。"""
+    重复的「贴图太大」提醒却要分别去理解和处理。
+
+    判据用长边而不是总面积：非正方形的「4K」贴图（比如 4096×2048 的贴图条、
+    HDRI 常见的 4096×2048 等宽比 2:1）总面积够不到 4096×4096，之前按面积算
+    会漏检这批常见的非正方形大图；长边口径与 count_big_textures（贴图强制
+    压缩向导用的计数）保持一致，两处不再各算各的。"""
     big = []
     for img in bpy.data.images:
         if not img or not _is_real_image(img):
             continue
         w, h = getattr(img, 'size', (0, 0))
-        if w * h >= 4096 * 4096:
+        if max(w, h) >= 4096:
             big.append(img)
     if not big:
         return None
-    big.sort(key=lambda i: i.size[0] * i.size[1], reverse=True)
-    n8k = sum(1 for i in big if i.size[0] * i.size[1] >= 8192 * 8192)
+    big.sort(key=lambda i: max(i.size), reverse=True)
+    n8k = sum(1 for i in big if max(i.size) >= 8192)
     impact = IMPACT_HIGH if n8k else IMPACT_MED
 
     lines = []
@@ -1219,6 +1284,7 @@ _QUICK_CHECKS = [
     check_material_images,
     check_normal_map_colorspace,
     check_big_textures,
+    check_unlinked_packed_images,
     check_subdivision_high,
     check_unused_materials,
     check_orphan_data,

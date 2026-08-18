@@ -47,8 +47,8 @@ def _refresh_downscale_cache():
     if fixes.get_downscale_report(props) is not None:
         return  # 缓存有效，不用重扫
     try:
-        n4, n2 = fixes.count_big_textures()
-        fixes.update_downscale_report(props, n4, n2)
+        n4, n2, n1, n512 = fixes.count_big_textures()
+        fixes.update_downscale_report(props, n4, n2, n1, n512)
     except Exception:
         pass
 

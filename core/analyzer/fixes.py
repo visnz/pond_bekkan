@@ -212,6 +212,26 @@ def set_images_colorspace_noncolor(image_names):
     return fixed
 
 
+def fix_remove_unlinked_packed_images(context, item):
+    """删除 MAT.unlinked_packed_images 检出的贴图数据块（已打包但没真正被用到）。
+
+    直接用 item.obj_names 里记好的名字（检测时已经判断过），不重新扫描判断——
+    避免"检测时判断没链接，删除时节点连线又变了"这种时间差引起的不一致；
+    bpy.data.images.remove 默认 do_unlink=True，会连带清掉引用它的（本就没接
+    输出的）贴图节点上的图片指针，不会留下悬空引用。
+    """
+    names = _object_names(item)
+    fixed = skipped = 0
+    for name in names:
+        img = bpy.data.images.get(name)
+        if img is None:
+            skipped += 1
+            continue
+        bpy.data.images.remove(img)
+        fixed += 1
+    return fixed, skipped, {}
+
+
 def fix_cap_subdivision(context, item, max_level):
     """把「简化」面板的细分级数上限（视口 simplify_subdivision + 渲染
     simplify_subdivision_render）都设为 max_level，并开启总开关 use_simplify。
@@ -651,14 +671,14 @@ def _overwrite_source_file(img, path):
 
 
 def count_big_textures():
-    """返回 (大于 4K 的张数, 大于 2K 的张数)，口径与 fix_downscale_textures 一致。
+    """返回 (大于4K, 大于2K, 大于1K, 大于512 的张数)，口径与 fix_downscale_textures 一致。
 
-    供向导第一步展示「检测到 N 张…」；大于 2K 含大于 4K（超集）。
+    供向导第一步展示「检测到 N 张…」；四档互为超集（大于4K 的必然也大于2K/1K/512）。
     注意：对未加载进内存的贴图（has_data=False，打包或磁盘皆然）读 img.size 会逐个
     读文件/打包块（实测约 1.4s/300 张），所以调用方应优先用场景缓存的
     get_downscale_report()，命中则不必重扫；此函数只在缓存失效时同步跑一次。
     """
-    n4 = n2 = 0
+    n4 = n2 = n1 = n512 = 0
     for img in bpy.data.images:
         if not img or not checks._is_real_image(img):
             continue
@@ -669,10 +689,13 @@ def count_big_textures():
         long_side = max(img.size)
         if long_side > 4096:
             n4 += 1
+        if long_side > 2048:
             n2 += 1
-        elif long_side > 2048:
-            n2 += 1
-    return n4, n2
+        if long_side > 1024:
+            n1 += 1
+        if long_side > 512:
+            n512 += 1
+    return n4, n2, n1, n512
 
 
 def get_downscale_report(props):
@@ -685,16 +708,19 @@ def get_downscale_report(props):
     total = getattr(props, 'downscale_total', -1)
     if total != len(bpy.data.images):
         return None
-    return getattr(props, 'downscale_n4', 0), getattr(props, 'downscale_n2', 0)
+    return (getattr(props, 'downscale_n4', 0), getattr(props, 'downscale_n2', 0),
+            getattr(props, 'downscale_n1', 0), getattr(props, 'downscale_n512', 0))
 
 
-def update_downscale_report(props, n4, n2):
+def update_downscale_report(props, n4, n2, n1, n512):
     """把扫描结果写进场景缓存（随 .blend 保存，后台预热也会更新它）。"""
     if props is None:
         return
     props.downscale_total = len(bpy.data.images)
     props.downscale_n4 = n4
     props.downscale_n2 = n2
+    props.downscale_n1 = n1
+    props.downscale_n512 = n512
 
 
 def fix_downscale_textures(context, max_size, mode):

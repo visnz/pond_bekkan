@@ -95,7 +95,12 @@ class ANALYZER_UL_finding(bpy.types.UIList):
             return (dismissed, _IMPACT_RANK.get(f.impact, 9), _EASE_RANK.get(f.ease, 9), i)
 
         order = sorted(range(n), key=_key)
-        return [self.bitflag_filter_item] * n, order
+        # flt_neworder 要求的是「原索引 -> 新位置」的反向映射，不是排好序的索引列表本身
+        # ——直接把 order 传回去会让显示顺序整体错位（这正是"难易排序方向反了"的根因）。
+        neworder = [0] * n
+        for new_pos, orig_idx in enumerate(order):
+            neworder[orig_idx] = new_pos
+        return [self.bitflag_filter_item] * n, neworder
 
     def draw_item(self, context, layout, data, item, icon,
                   active_data, active_propname, index, flt_flag=0):

@@ -11,7 +11,7 @@
   T2 pack_keep  缩小+打包+原图副本落在 .blend 旁
   T3 pack_delete 缩小+打包+删除磁盘源文件
   T4 幂等       已 ≤ 目标的图不被处理
-  T5 计数        count_big_textures 的 >4K/>2K 口径
+  T5 计数        count_big_textures 的 >4K/>2K/>1K/>512 口径
   T6 缓存        场景缓存 get/update_downscale_report 命中与失效
 """
 import os
@@ -127,12 +127,12 @@ def test_count():
     _setup()
     imgs = []
     try:
-        imgs.append(_make_generated("Cnt4096", 4096))   # 只 >2K
-        imgs.append(_make_generated("Cnt8192", 8192))   # >4K
-        imgs.append(_make_generated("Cnt3072", 3072))   # 只 >2K
-        n4, n2 = fixes.count_big_textures()
-        ok = (n4 == 1 and n2 == 3)
-        print(f"  n4={n4} n2={n2}（期望 n4=1 n2=3）")
+        imgs.append(_make_generated("Cnt4096", 4096))   # >1K/>2K，不 >4K
+        imgs.append(_make_generated("Cnt8192", 8192))   # >4K/>2K/>1K
+        imgs.append(_make_generated("Cnt3072", 3072))   # >1K/>2K，不 >4K
+        n4, n2, n1, n512 = fixes.count_big_textures()
+        ok = (n4 == 1 and n2 == 3 and n1 == 3 and n512 == 3)
+        print(f"  n4={n4} n2={n2} n1={n1} n512={n512}（期望 n4=1 n2=3 n1=3 n512=3）")
         return ok
     finally:
         for img in imgs:
@@ -147,11 +147,11 @@ def test_cache():
     img = None
     try:
         r0 = fixes.get_downscale_report(props)      # 未计算 → None
-        fixes.update_downscale_report(props, 1, 3)
+        fixes.update_downscale_report(props, 1, 3, 3, 3)
         r1 = fixes.get_downscale_report(props)      # 图片数一致 → 命中
         img = _make_generated("CacheBig", 4096)
         r2 = fixes.get_downscale_report(props)      # 图片总数变了 → 失效
-        ok = (r0 is None and r1 == (1, 3) and r2 is None)
+        ok = (r0 is None and r1 == (1, 3, 3, 3) and r2 is None)
         print(f"  未计算=None:{r0 is None} 命中={r1} 增图后失效:{r2 is None}")
         return ok
     finally:
