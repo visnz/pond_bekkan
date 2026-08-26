@@ -24,7 +24,6 @@ import blf
 import numpy as np
 from gpu_extras.batch import batch_for_shader
 from bpy.app.handlers import persistent
-from bpy_extras.view3d_utils import location_3d_to_region_2d
 
 # 画回 shader 是否做 sRGB 预解码（校准开关，见文件头标定记录）
 _DRAW_DECODE_SRGB = True
@@ -124,6 +123,75 @@ def _free_res(area_id):
     disp_snap.pop(area_id, None)
 
 
+def _capture_screenshot(context, area, region):
+    """截图路径：Cycles 等渐进采样引擎的视口此刻已经在正常显示流程里收敛好了，
+    没必要重新渲染——用 Blender 自带的 screen.screenshot_area 把当前区域此刻
+    显示的真实像素存成临时文件再读回来。这是唯一被实测证实能看到 Cycles 真实
+    收敛结果的路径：POST_PIXEL 回调里 gpu.state.active_framebuffer_get() 读到的
+    不是 Cycles 合成的目标，实测永远是黑图（Cycles 疑似走另一条 GPU 合成路径，
+    不经过标准视口 FBO），而 screenshot_area 直接读窗口/编辑器实际显示内容，
+    经用户实测确认截出来的画面是正常的。见
+    开发计划/2026-08-19_Cycles视口快照黑屏修复.md。
+
+    screenshot_area 截的是整个 area（含标题栏/工具栏/N 面板），必须按 region
+    相对 area 的像素偏移裁剪出纯 3D 视口内容；额外按截图实际像素数 / area 逻辑
+    尺寸算一个缩放系数，防止 HiDPI/系统缩放下两者不是 1:1（未实测验证过这一步，
+    缩放为 1 时等价于不做任何变换）。
+
+    注意：这里不主动触发任何重绘（不调用 wm.redraw_timer）。实测过
+    'DRAW_WIN_SWAP'（窗口级）和 'DRAW_SWAP'（区域级）都会让 Cycles / EEVEE Next
+    的渐进累积缓冲被当成"场景变了"重置，拍出来是采样几乎为零的灰色占位图——
+    这两个都是给性能测试用的调试 API，语义上是"强制走一次完整的场景求值+渲染"，
+    不是"轻量把已经画好的东西重新提交一次"，对渐进渲染引擎不安全，因此调用方
+    需要的重绘改用 area.tag_redraw() 走 Blender 正常事件循环（见 TakeSnap），
+    这里只管截图，不管重绘。"""
+    import os
+    import tempfile
+
+    aw, ah = int(area.width), int(area.height)
+    rw, rh = int(region.width), int(region.height)
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="pond_snap_")
+    os.close(fd)
+    img = None
+    try:
+        with context.temp_override(area=area, region=region):
+            bpy.ops.screen.screenshot_area(filepath=path)
+        img = bpy.data.images.load(path)
+        # 标 Non-Color/Raw：截图字节本身就是最终显示编码值，画回前会在 shader 里
+        # 统一做一次预解码（_DRAW_DECODE_SRGB），这里不能再被当成 sRGB 文件先解码一遍
+        for cs in ("Non-Color", "Raw"):
+            try:
+                img.colorspace_settings.name = cs
+                break
+            except Exception:
+                continue
+        iw, ih = int(img.size[0]), int(img.size[1])
+        arr = np.array(img.pixels[:], dtype=np.float32).reshape(ih, iw, 4)
+        sx = (iw / aw) if aw else 1.0
+        sy = (ih / ah) if ah else 1.0
+        # region/area 原点都是左下角、Y 向上，跟 img.pixels 的行序（从下往上）天然对齐
+        off_x = int(round((region.x - area.x) * sx))
+        off_y = int(round((region.y - area.y) * sy))
+        off_x = max(0, min(iw - 1, off_x))
+        off_y = max(0, min(ih - 1, off_y))
+        x1 = max(off_x + 1, min(iw, off_x + int(round(rw * sx))))
+        y1 = max(off_y + 1, min(ih, off_y + int(round(rh * sy))))
+        crop = np.ascontiguousarray(arr[off_y:y1, off_x:x1, :])
+        # 截图 PNG 的 alpha 通道未必有意义，强制置 1，避免画回时 ALPHA 混合出现透明
+        crop[:, :, 3] = 1.0
+        cw, ch = crop.shape[1], crop.shape[0]
+        buf = gpu.types.Buffer("FLOAT", cw * ch * 4, crop)
+        tex = gpu.types.GPUTexture((cw, ch), format="RGBA8", data=buf)
+        return tex, cw, ch
+    finally:
+        if img is not None:
+            bpy.data.images.remove(img)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def _srgb_encode(rgb):
     """sRGB 编码（标准分段曲线）。Snapshot 本体已不再使用，
     保留给 tools/test_snap_visual.py 做色彩链路标定"""
@@ -133,69 +201,6 @@ def _srgb_encode(rgb):
 def _srgb_decode(rgb):
     """sRGB 解码（标准分段曲线），导出图像数据块时把显示值换回 scene-linear"""
     return np.where(rgb <= 0.04045, rgb / 12.92, np.power((rgb + 0.055) / 1.055, 2.4))
-
-
-def _passepartout_mask(context, space, region, rv3d):
-    """算出当前摄像机遮罩需要压黑的矩形（region 像素坐标）与透明度。
-
-    不在摄像机视角/摄像机没开遮罩/取景框投影失败时返回 None（不遮罩，维持原样）。
-    取景框算法：camera.view_frame 拿本地空间 4 角点 -> matrix_world 变换到世界坐标
-    -> location_3d_to_region_2d 投影到 region 像素坐标，取 min/max 即矩形，自动适配
-    Sensor Fit 造成的 letterbox/pillarbox。
-    """
-    if getattr(rv3d, "view_perspective", None) != "CAMERA":
-        return None
-    cam_obj = space.camera if getattr(space, "use_local_camera", False) else context.scene.camera
-    if cam_obj is None or cam_obj.data is None or not getattr(cam_obj.data, "show_passepartout", False):
-        return None
-    try:
-        frame = cam_obj.data.view_frame(scene=context.scene)
-        mat = cam_obj.matrix_world
-        pts = [location_3d_to_region_2d(region, rv3d, mat @ corner) for corner in frame]
-        if any(p is None for p in pts):
-            return None
-    except Exception:
-        return None
-    xs = [p.x for p in pts]
-    ys = [p.y for p in pts]
-    x0 = max(0, min(region.width, round(min(xs))))
-    x1 = max(0, min(region.width, round(max(xs))))
-    y0 = max(0, min(region.height, round(min(ys))))
-    y1 = max(0, min(region.height, round(max(ys))))
-    return x0, y0, x1, y1, cam_obj.data.passepartout_alpha
-
-
-def _capture_offscreen(context, area, space, region):
-    """离屏重画当前视口并转为 RGBA8 纹理。
-    draw_view3d 一次同步渲出全部采样（EEVEE 无采样竞态，比旧延时截图更可靠）；
-    do_color_management=True 的 float 输出只含视图变换、不含最终 EOTF（5.2 实测：
-    捕获值 C = srgb_dec(屏幕字节 D)），存储语义与渲染 PNG 加载后的线性像素一致，
-    画回侧的预解码（_DRAW_DECODE_SRGB）以此为基准。面板等 region UI 天然不入镜。
-    摄像机遮罩（Passepartout）是交互视口另外画的 2D 引导层，draw_view3d 不会带出来，
-    这里额外读一次遮罩矩形手动压黑做后处理补上。大场景拍摄会同步阻塞，属预期"""
-    w, h = int(region.width), int(region.height)
-    rv3d = space.region_3d
-    # 离屏必须 RGBA32F：其 read() 返回 FLOAT Buffer，可直接喂 GPUTexture
-    off = gpu.types.GPUOffScreen(w, h, format="RGBA32F")
-    try:
-        with context.temp_override(area=area, region=region, space_data=space):
-            off.draw_view3d(context.scene, context.view_layer, space, region,
-                            rv3d.view_matrix, rv3d.window_matrix,
-                            do_color_management=True)
-        buf = off.texture_color.read()
-        buf.dimensions = w * h * 4
-        mask = _passepartout_mask(context, space, region, rv3d)
-        if mask is not None:
-            x0, y0, x1, y1, alpha = mask
-            arr = np.array(buf, dtype=np.float32).reshape(h, w, 4)
-            keep = np.zeros((h, w), dtype=bool)
-            keep[y0:y1, x0:x1] = True
-            arr[~keep, :3] *= (1.0 - alpha)
-            buf = gpu.types.Buffer("FLOAT", w * h * 4, arr)
-        tex = gpu.types.GPUTexture((w, h), format="RGBA8", data=buf)  # 内部量化
-    finally:
-        off.free()  # GPUOffScreen 必须显式释放；GPUTexture 无 free()，靠解除引用 + GC
-    return tex, w, h
 
 
 def _finish_capture(scene, area, area_id, tex, w, h):
@@ -315,31 +320,41 @@ class SnapItem(bpy.types.PropertyGroup):
 
 
 class TakeSnap(bpy.types.Operator):
-    """拍摄当前 3D 视口快照"""
+    """拍摄当前 3D 视口快照。
+
+    统一走截图路径：直接读当前视口此刻已经显示在屏幕上的真实像素，不重新触发
+    渲染——离屏重渲对 EEVEE 这类同步引擎虽然可行，但会跟屏幕当前画面不一致
+    （视角/叠加层可能在拍摄瞬间已经变化），对 Cycles 等渐进采样引擎更是直接
+    拍出黑图/半成品（全新 session，零采样）。截图路径不区分引擎，眼见为实。
+    见 开发计划/2026-08-19_Cycles视口快照黑屏修复.md。
+
+    如果本窗口当前正显示着旧的对比覆盖层，摘掉显示标记（disp_snap.pop）只是
+    清空一个 Python 字典，屏幕上这一刻实际画着的还是摘掉前那一帧（带着旧覆盖
+    层）——直接截图会把旧覆盖层拍进新快照。这种情况下需要先等 Blender 走一次
+    正常的重绘，再截图；这一等用 modal + wm 定时器实现（tag_redraw 之后等一个
+    事件循环节拍），跟平时移动窗口/切换焦点触发的重绘性质完全一样，不会让
+    Cycles / EEVEE Next 以为场景变了而重置渐进累积——绝不能用
+    wm.redraw_timer 那套调试 API 强制刷新，见 _capture_screenshot 里的说明。
+    没有旧覆盖层要摘时（prev is None）当前屏幕已经是干净画面，直接截图，
+    不需要这一等，保持原有的"立即拍摄"体验。
+    """
     bl_idname = "object.take_snapshot"
     bl_label = "拍摄快照"
+
+    _timer = None
+    _area = None
+    _region = None
+    _area_id = None
+    _prev = None
+    _scene = None
 
     @classmethod
     def poll(cls, context):
         return context.area and context.area.type == "VIEW_3D"
 
-    def execute(self, context):
-        area = context.area
-        if area is None or area.type != "VIEW_3D":
-            self.report({"WARNING"}, "请在3D视口中使用")
-            return {"CANCELLED"}
-        space = context.space_data
-        scene = context.scene
-        region = next((r for r in area.regions if r.type == "WINDOW"), None)
-        if region is None or getattr(space, "region_3d", None) is None:
-            self.report({"ERROR"}, "找不到视口")
-            return {"CANCELLED"}
-        area_id = _aid(area)
-        # 拍摄期间摘下本窗口的显示标志：若离屏重画触发 Python 绘制回调，防止旧叠加被拍进新快照；
-        # 失败时回滚。op 内不写任何 RNA，旧版「undo 推入撤销 show_region_*」的崩溃面整体消失
-        prev = disp_snap.pop(area_id, None)
+    def _do_capture(self, context, area, region, scene, area_id, prev):
         try:
-            tex, w, h = _capture_offscreen(context, area, space, region)
+            tex, w, h = _capture_screenshot(context, area, region)
         except Exception as e:
             if prev is not None:
                 disp_snap[area_id] = prev
@@ -348,6 +363,42 @@ class TakeSnap(bpy.types.Operator):
         _finish_capture(scene, area, area_id, tex, w, h)
         self.report({"INFO"}, f"快照 {scene.snapshot_list[-1].name} 已存")
         return {"FINISHED"}
+
+    def execute(self, context):
+        area = context.area
+        if area is None or area.type != "VIEW_3D":
+            self.report({"WARNING"}, "请在3D视口中使用")
+            return {"CANCELLED"}
+        region = next((r for r in area.regions if r.type == "WINDOW"), None)
+        if region is None:
+            self.report({"ERROR"}, "找不到视口")
+            return {"CANCELLED"}
+        scene = context.scene
+        area_id = _aid(area)
+        # 拍摄期间摘下本窗口的显示标志：防止旧叠加被拍进新快照；失败时回滚。
+        # op 内不写任何 RNA，旧版「undo 推入撤销 show_region_*」的崩溃面整体消失
+        prev = disp_snap.pop(area_id, None)
+        if prev is None:
+            return self._do_capture(context, area, region, scene, area_id, prev)
+        # 有旧覆盖层要摘：等一次自然重绘再截图，见类文档字符串
+        self._area, self._region, self._area_id = area, region, area_id
+        self._prev, self._scene = prev, scene
+        for r in area.regions:
+            if r.type == "WINDOW":
+                r.tag_redraw()
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.05, window=context.window)
+        wm.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        self._timer = None
+        return self._do_capture(
+            context, self._area, self._region, self._scene,
+            self._area_id, self._prev)
 
 
 class ToggleSnap(bpy.types.Operator):
