@@ -466,23 +466,39 @@ class P2E_anim_migrate(bpy.types.Operator):
 
         # 2) 把物体的动画迁移到上级空物体：为每个 fcurve 创建对应曲线并复制关键帧，
         #    避免依赖 NLA 或 slotted action 的绑定行为差异。
+        # Blender 5.2 起 Action 是分层结构，没有 Action.fcurves 直接访问：
+        #   读——action.layers -> layer.strips -> strip.channelbag(slot).fcurves；
+        #   写——必须先把 dst_action 赋给 empty.animation_data.action，
+        #       再调 dst_action.fcurve_ensure_for_datablock(empty, ...) 才不会报错。
         migrated = 0
         ad = obj.animation_data
         if ad and ad.action:
             src_action = ad.action
-            dst_action = bpy.data.actions.new(name=f"{obj.name}_上级")
+            src_slot = ad.action_slot
 
-            # 复制 fcurve（关键帧 + 插值 + handle + 修饰器）
-            for src_fc in src_action.fcurves:
+            src_fcurves = []
+            for layer in src_action.layers:
+                for strip in layer.strips:
+                    if strip.type != 'KEYFRAME':
+                        continue
+                    cb = strip.channelbag(src_slot) if src_slot else None
+                    if cb:
+                        src_fcurves.extend(cb.fcurves)
+
+            dst_action = bpy.data.actions.new(name=f"{obj.name}_上级")
+            empty.animation_data_create()
+            empty.animation_data.action = dst_action
+
+            for src_fc in src_fcurves:
                 try:
-                    dst_fc = dst_action.fcurves.new(
-                        data_path=src_fc.data_path,
-                        index=src_fc.array_index,
-                        action_group=src_fc.group.name if src_fc.group else ""
+                    dst_fc = dst_action.fcurve_ensure_for_datablock(
+                        empty, src_fc.data_path, index=src_fc.array_index
                     )
                 except Exception:
                     # 空物体没有的属性（如 shape key、modifier 属性）跳过
                     continue
+                # 注：不迁移 fcurve.group——实测跨 action 赋值同名分组会静默失效
+                # （不报错但读回来是 None），迁移了也没有实际效果。
 
                 # 复制关键帧
                 n = len(src_fc.keyframe_points)
@@ -514,8 +530,6 @@ class P2E_anim_migrate(bpy.types.Operator):
 
             # 清除原物体动画数据，空物体接管新 action
             obj.animation_data_clear()
-            empty.animation_data_create()
-            empty.animation_data.action = dst_action
 
         # 3) 把物体包进上级空物体：上级=空物体，物体自身变换归零（局部单位化），
         #    这样物体世界变换完全由上级空物体的动画驱动，视觉上与原动画一致。
