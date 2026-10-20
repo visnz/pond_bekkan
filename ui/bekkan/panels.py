@@ -48,6 +48,7 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         col.operator("object.add_light_with_constraint", icon='LIGHT_SPOT')
         col.operator("object.delete_empty_null_visn", icon='X')
         col.operator("camera.create_focus_object", icon='VIEW_CAMERA')
+        col.operator("object.checkerboard_layout_visn", icon='MESH_GRID')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
