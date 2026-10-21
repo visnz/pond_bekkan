@@ -38,6 +38,30 @@ def _switch_sidebar_category(mode):
                 break
 
 
+class WM_OT_toggle_pond_bekkan_sidebar(bpy.types.Operator):
+    """快捷键呼出 N 面板并切到本插件的分类页（Ctrl+` 默认绑定）。
+    独立版固定切到自己唯一的分类；合体版按当前 prefs.mode 决定切「池塘」还是
+    「别馆」。只负责打开并切到目标页，已经在目标页时保持显示，不做收起。"""
+    bl_idname = "wm.toggle_pond_bekkan_sidebar_visn"
+    bl_label = "呼出池塘/别馆面板"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        bm = _build_mode.BUILD_MODE
+        if bm == "pond":
+            mode = "POND"
+        elif bm == "bekkan":
+            mode = "BEKKAN"
+        else:
+            try:
+                pkg = __package__.split(".")[0]
+                mode = context.preferences.addons[pkg].preferences.mode
+            except Exception:
+                mode = "POND"
+        _switch_sidebar_category(mode)
+        return {'FINISHED'}
+
+
 def _on_mode_update(self, context):
     """合体版：切换蛙灾/别馆 UI。
 
@@ -177,14 +201,27 @@ for _key, _label in BEKKAN_MODULES:
 _classes = (
     ADDONMANAGER_CategoryExcludeItem,
     PondBekkanPreferences,
+    WM_OT_toggle_pond_bekkan_sidebar,
 )
+
+_addon_keymaps = []
 
 
 def register():
     for c in _classes:
         bpy.utils.register_class(c)
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        km = kc.keymaps.new(name="3D View", space_type="VIEW_3D")
+        kmi = km.keymap_items.new(
+            "wm.toggle_pond_bekkan_sidebar_visn", "ACCENT_GRAVE", "PRESS", ctrl=True)
+        _addon_keymaps.append((km, kmi))
 
 
 def unregister():
+    for km, kmi in _addon_keymaps:
+        km.keymap_items.remove(kmi)
+    _addon_keymaps.clear()
     for c in reversed(_classes):
         bpy.utils.unregister_class(c)
