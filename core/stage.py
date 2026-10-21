@@ -3,6 +3,7 @@
 # Bekkan 两套机组（C-P / C-SP-ZT）与 Pond 的简洁机组是不同设计，双双保留；
 # Bekkan 原版 op 保留原 bl_idname。
 # （面板在 ui/bekkan/panels.py 与 ui/pond/panels/cam_rig.py）
+import math
 import os
 import platform
 import subprocess
@@ -272,6 +273,120 @@ class POND_OT_cam_rig_build(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _world_bbox(obj):
+    """物体世界空间包围盒角点，返回 (max_span, bottom_z)：
+    max_span 取 XYZ 三轴跨度里最大的一个作为该物体的"体量"代表值；
+    bottom_z 取世界空间最低点，用于落地对齐。无网格数据的物体（空物体等）
+    bound_box 退化为 8 个重合的原点，自然得到 max_span=0。"""
+    corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    xs = [c.x for c in corners]
+    ys = [c.y for c in corners]
+    zs = [c.z for c in corners]
+    max_span = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+    return max_span, min(zs)
+
+
+def _checkerboard_warnings(objs):
+    """返回警告文案列表：物体数超 100 / 尺寸最大最小比超 100 倍。"""
+    warnings = []
+    if len(objs) > 100:
+        warnings.append(f"选中了 {len(objs)} 个物体（超过 100 个），陈列范围会很大，请确认是否需要全部摆开。")
+    spans = [s for s, _ in (_world_bbox(o) for o in objs) if s > 1e-6]
+    if spans and (max(spans) / min(spans)) > 100:
+        warnings.append(
+            f"所选物体尺寸差距超过 100 倍（最大 {max(spans):.3g} / 最小 {min(spans):.3g}），"
+            "网格会被最大的物体撑开，很小的物体可能变得肉眼难以察觉，建议先手动排查。")
+    return warnings
+
+
+class StageCheckerboardLayout(bpy.types.Operator):
+    """把所选物体以激活物体为中心，按棋盘格网格重新摆开，方便逐个查看"""
+    bl_idname = "object.checkerboard_layout_visn"
+    bl_label = "棋盘格陈列"
+    bl_description = "以激活物体为中心，把所选物体按棋盘格网格摊开摆放，整理查看用"
+    bl_options = {"REGISTER", "UNDO"}
+
+    margin: bpy.props.FloatProperty(
+        name="格子间距系数", default=1.2, min=1.0,
+        description="格子边长 = 所选物体中最大的包围盒尺寸 × 这个系数")
+
+    _warnings = None
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects) and context.active_object is not None
+
+    def invoke(self, context, event):
+        objs = context.selected_objects
+        if context.active_object not in objs:
+            self.report({'ERROR'}, "激活物体必须在选中范围内")
+            return {'CANCELLED'}
+        self._warnings = _checkerboard_warnings(objs)
+        if self._warnings:
+            return context.window_manager.invoke_props_dialog(self, width=420)
+        return self.execute(context)
+
+    def draw(self, context):
+        if not self._warnings:
+            return
+        col = self.layout.column()
+        for w in self._warnings:
+            col.label(text=w, icon='ERROR')
+        col.label(text="点击「确定」继续陈列，取消则不做任何改动。", icon='INFO')
+
+    def execute(self, context):
+        objs = context.selected_objects
+        active = context.active_object
+        if active not in objs:
+            self.report({'ERROR'}, "激活物体必须在选中范围内")
+            return {'CANCELLED'}
+
+        bbox = {o: _world_bbox(o) for o in objs}
+        spans = [s for s, _ in bbox.values()]
+        cell_size = (max(spans) if max(spans) > 1e-6 else 1.0) * self.margin
+
+        n = len(objs)
+        grid = max(1, math.ceil(math.sqrt(n)))
+        r0 = grid // 2
+        c0 = grid // 2
+
+        # 以到中心格的切比雪夫距离（环层）排序，环内再按欧式距离、行列号兜底，
+        # 保证每次运行结果一致、可复现
+        cells = [(r, c) for r in range(grid) for c in range(grid)]
+        cells.sort(key=lambda rc: (
+            max(abs(rc[0] - r0), abs(rc[1] - c0)),
+            (rc[0] - r0) ** 2 + (rc[1] - c0) ** 2,
+            rc[0], rc[1],
+        ))
+        cells.remove((r0, c0))
+
+        others = sorted((o for o in objs if o is not active), key=lambda o: o.name)
+
+        active_x = active.matrix_world.translation.x
+        active_y = active.matrix_world.translation.y
+        ground_z = bbox[active][1]
+
+        for obj, (r, c) in zip(others, cells):
+            dx = (c - c0) * cell_size
+            dy = (r0 - r) * cell_size
+            _, bottom_z = bbox[obj]
+            local_offset_z = obj.matrix_world.translation.z - bottom_z
+            obj.matrix_world.translation = Vector((
+                active_x + dx, active_y + dy, ground_z + local_offset_z,
+            ))
+
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+                if region:
+                    with context.temp_override(area=area, region=region):
+                        bpy.ops.view3d.view_selected()
+                break
+
+        self.report({'INFO'}, f"已将 {n} 个物体陈列为 {grid}×{grid} 棋盘格")
+        return {'FINISHED'}
+
+
 _classes = (
     DeleteEmptyNull,
     FastCentreCamera,
@@ -279,6 +394,7 @@ _classes = (
     OpenProjectFolderOperator,
     AddLightWithConstraint,
     POND_OT_cam_rig_build,
+    StageCheckerboardLayout,
 )
 
 
