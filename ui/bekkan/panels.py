@@ -49,6 +49,7 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         col.operator("object.delete_empty_null_visn", icon='X')
         col.operator("camera.create_focus_object", icon='VIEW_CAMERA')
         col.operator("object.checkerboard_layout_visn", icon='MESH_GRID')
+        col.operator("object.legacy_fbx_import_visn", icon='IMPORT')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):

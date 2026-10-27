@@ -273,6 +273,19 @@ class POND_OT_cam_rig_build(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class StageLegacyFbxImport(bpy.types.Operator):
+    """呼出 Blender 内置 FBX 导入器自己的文件选择/选项窗口（骨骼定向等老选项都在
+    那个窗口里），不额外包任何自定义参数或逻辑——单纯图个面板里顺手点的入口。"""
+    bl_idname = "object.legacy_fbx_import_visn"
+    bl_label = "旧版FBX导入器（骨骼定向）"
+    bl_description = "呼出 Blender 内置 FBX 导入器的选项窗口，用于需要骨骼定向等老选项的场景"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        bpy.ops.import_scene.fbx("INVOKE_DEFAULT")
+        return {"FINISHED"}
+
+
 def _world_bbox(obj):
     """物体世界空间包围盒角点，返回 (max_span, bottom_z)：
     max_span 取 XYZ 三轴跨度里最大的一个作为该物体的"体量"代表值；
@@ -395,6 +408,7 @@ _classes = (
     AddLightWithConstraint,
     POND_OT_cam_rig_build,
     StageCheckerboardLayout,
+    StageLegacyFbxImport,
 )
 
 
