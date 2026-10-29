@@ -273,6 +273,119 @@ class POND_OT_cam_rig_build(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_ANCHOR_TYPES = {"MESH", "CURVE"}
+
+
+def _world_points(obj):
+    """物体在世界空间下的真实控制点：mesh 顶点 / 曲线控制点+贝塞尔手柄。
+    用于算一个贴合实际形状的世界空间包围盒——不能用局部包围盒的 8 个角点
+    整体乘 matrix_world：局部 AABB 本身就比圆柱/不规则 mesh 等非箱形状宽松，
+    物体旋转后再整体转这个盒子，只会比真实形状的世界空间范围更大（盒子套
+    盒子的误差），导致算出来的顶/底偏出视觉边界。贝塞尔曲线段必然落在四个
+    控制点（两端点+两手柄）的凸包内，所以手柄也要算进去，否则会漏算手柄
+    拉出去的那部分曲线。"""
+    mw = obj.matrix_world
+    pts = []
+    if obj.type == "MESH":
+        for v in obj.data.vertices:
+            pts.append(mw @ v.co)
+    elif obj.type == "CURVE":
+        for spline in obj.data.splines:
+            if spline.type == "BEZIER":
+                for bp in spline.bezier_points:
+                    pts.append(mw @ bp.co)
+                    pts.append(mw @ bp.handle_left)
+                    pts.append(mw @ bp.handle_right)
+            else:
+                for p in spline.points:
+                    pts.append(mw @ Vector(p.co[:3]))
+    return pts
+
+
+def _anchor_to_bbox(context, objs, pick_z):
+    """把每个物体的原点移到自身世界空间包围盒的「顶部中心」或「底部中心」
+    （pick_z 从世界 Z 坐标列表里选 min 或 max）。XY 取世界空间范围的中点
+    （包围盒中心，不是顶点均值——均值会被顶点密度带偏）。
+    做法与 core/organize.py 的 POND_OT_origin_bottom 一致：挪 3D 游标到
+    目标点、调用 origin_set(ORIGIN_CURSOR)，再把游标和选中状态还原。"""
+    sel = [o for o in objs if o.type in _ANCHOR_TYPES]
+    if not sel:
+        return 0
+
+    cursor = context.scene.cursor
+    cursor_backup = cursor.location.copy()
+    active_backup = context.view_layer.objects.active
+    selected_backup = list(context.selected_objects)
+    processed = 0
+
+    try:
+        for o in sel:
+            pts = _world_points(o)
+            if not pts:
+                continue
+            xs = [p.x for p in pts]
+            ys = [p.y for p in pts]
+            zs = [p.z for p in pts]
+            target = Vector((
+                (min(xs) + max(xs)) / 2.0,
+                (min(ys) + max(ys)) / 2.0,
+                pick_z(zs),
+            ))
+            bpy.ops.object.select_all(action="DESELECT")
+            o.select_set(True)
+            context.view_layer.objects.active = o
+            cursor.location = target
+            bpy.ops.object.origin_set(type="ORIGIN_CURSOR")
+            processed += 1
+    finally:
+        cursor.location = cursor_backup
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in selected_backup:
+            o.select_set(True)
+        context.view_layer.objects.active = active_backup
+    return processed
+
+
+class StageAnchorTop(bpy.types.Operator):
+    """所选物体原点批量设到（世界空间）包围盒顶部中心"""
+    bl_idname = "object.anchor_to_top_visn"
+    bl_label = "锚点到顶部中心"
+    bl_description = "把所选物体的原点移到各自包围盒的顶部中心（按物体当前实际的旋转/缩放表现计算）"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects) and context.mode == "OBJECT"
+
+    def execute(self, context):
+        n = _anchor_to_bbox(context, context.selected_objects, max)
+        if n == 0:
+            self.report({"WARNING"}, "所选里没有带几何的物体")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"已将 {n} 个物体的原点设到包围盒顶部中心")
+        return {"FINISHED"}
+
+
+class StageAnchorBottom(bpy.types.Operator):
+    """所选物体原点批量设到（世界空间）包围盒底部中心"""
+    bl_idname = "object.anchor_to_bottom_visn"
+    bl_label = "锚点到底部中心"
+    bl_description = "把所选物体的原点移到各自包围盒的底部中心（按物体当前实际的旋转/缩放表现计算）"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects) and context.mode == "OBJECT"
+
+    def execute(self, context):
+        n = _anchor_to_bbox(context, context.selected_objects, min)
+        if n == 0:
+            self.report({"WARNING"}, "所选里没有带几何的物体")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"已将 {n} 个物体的原点设到包围盒底部中心")
+        return {"FINISHED"}
+
+
 def _world_bbox(obj):
     """物体世界空间包围盒角点，返回 (max_span, bottom_z)：
     max_span 取 XYZ 三轴跨度里最大的一个作为该物体的"体量"代表值；
@@ -395,6 +508,8 @@ _classes = (
     AddLightWithConstraint,
     POND_OT_cam_rig_build,
     StageCheckerboardLayout,
+    StageAnchorTop,
+    StageAnchorBottom,
 )
 
 
