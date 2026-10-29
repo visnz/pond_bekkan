@@ -50,6 +50,9 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         col.operator("camera.create_focus_object", icon='VIEW_CAMERA')
         col.operator("object.checkerboard_layout_visn", icon='MESH_GRID')
         col.operator("object.legacy_fbx_import_visn", icon='IMPORT')
+        row = col.row(align=True)
+        row.operator("object.anchor_to_top_visn", text="锚点到顶部中心", icon='ANCHOR_TOP')
+        row.operator("object.anchor_to_bottom_visn", text="锚点到底部中心", icon='ANCHOR_BOTTOM')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
