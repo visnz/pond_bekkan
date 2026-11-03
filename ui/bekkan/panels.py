@@ -53,6 +53,7 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         row = col.row(align=True)
         row.operator("object.anchor_to_top_visn", text="锚点到顶部中心", icon='ANCHOR_TOP')
         row.operator("object.anchor_to_bottom_visn", text="锚点到底部中心", icon='ANCHOR_BOTTOM')
+        col.operator("object.clear_all_fake_users_visn", icon='X')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):

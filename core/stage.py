@@ -61,6 +61,39 @@ class DeleteEmptyNull(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class StageClearAllFakeUsers(bpy.types.Operator):
+    """清除当前工程所有可编辑数据块的 Fake User 标记"""
+    bl_idname = "object.clear_all_fake_users_visn"
+    bl_label = "清除所有 Fake User"
+    bl_description = "清除当前工程所有本地数据块的 Fake User；未被引用的数据块可能在下次保存后消失"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        cleared = 0
+        skipped = 0
+        for datablock in tuple(bpy.data.all_ids):
+            if not getattr(datablock, "use_fake_user", False):
+                continue
+            if datablock.library is not None:
+                skipped += 1
+                continue
+            try:
+                datablock.use_fake_user = False
+            except (AttributeError, RuntimeError, TypeError):
+                skipped += 1
+            else:
+                cleared += 1
+
+        if skipped:
+            self.report({"WARNING"}, f"已清除 {cleared} 个 Fake User；{skipped} 个链接或只读数据块未能修改")
+        else:
+            self.report({"INFO"}, f"已清除 {cleared} 个 Fake User" if cleared else "当前工程没有需要清除的 Fake User")
+        return {"FINISHED"}
+
+
 class FastCentreCamera(bpy.types.Operator):
     bl_idname = "object.fast_camera_visn"
     bl_label = "C-P摄像机组"
@@ -515,6 +548,7 @@ class StageCheckerboardLayout(bpy.types.Operator):
 
 _classes = (
     DeleteEmptyNull,
+    StageClearAllFakeUsers,
     FastCentreCamera,
     CSPZT_Camera,
     OpenProjectFolderOperator,
