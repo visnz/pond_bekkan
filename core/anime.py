@@ -384,7 +384,58 @@ class AUTOSWAY_OT_AdjustParameter(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_sync_armature_psr(bpy.types.Operator):
+    bl_idname = 'object.sync_armature_psr_visn'
+    bl_label = '同步骨架姿态 PSR'
+    bl_description = '物体模式：最后选中的骨架为源，按同名骨骼复制当前局部位置、旋转、缩放到其余选中骨架；不复制动画、约束、权重或骨架物体变换'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT' and context.active_object is not None
+                and context.active_object.type == 'ARMATURE'
+                and context.active_object in context.selected_objects
+                and sum(o.type == 'ARMATURE' for o in context.selected_objects) >= 2)
+
+    def execute(self, context):
+        source = context.active_object
+        # 先快照源通道，保留欧拉角圈数及四元数/轴角表达，不经过矩阵分解。
+        fields = ('location', 'rotation_euler', 'rotation_quaternion', 'rotation_axis_angle', 'scale')
+        values = {b.name: (b.rotation_mode, {f: tuple(getattr(b, f)) for f in fields})
+                  for b in source.pose.bones}
+        copied = 0
+        bones_copied = 0
+        skipped = []
+        for target in context.selected_objects:
+            if target == source or target.type != 'ARMATURE':
+                continue
+            if not target.is_editable:
+                skipped.append(target.name + '（只读）')
+                continue
+            if len(target.pose.bones) != len(values):
+                skipped.append(target.name + '（骨骼数量不同）')
+                continue
+            for bone in target.pose.bones:
+                if bone.name not in values:
+                    continue
+                mode, channels = values[bone.name]
+                bone.rotation_mode = mode
+                for field, value in channels.items():
+                    setattr(bone, field, value)
+                bones_copied += 1
+            target.update_tag()
+            copied += 1
+        if skipped:
+            print('[PondBekkan] 姿态同步跳过：' + '；'.join(skipped))
+        message = f'源：{source.name}；已处理 {copied} 个骨架，同步 {bones_copied} 根骨骼'
+        if skipped:
+            message += f'；跳过 {len(skipped)} 个数量不同或只读骨架'
+        self.report({'WARNING'} if skipped else {'INFO'}, message)
+        return {'FINISHED'} if copied else {'CANCELLED'}
+
+
 _classes = (
+    OBJECT_OT_sync_armature_psr,
     OBJECT_OT_add_noise_anim,
     NoiseAnimSettings,
     RemoveAllAnimations,

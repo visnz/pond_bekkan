@@ -87,6 +87,7 @@ class VIEW3D_PT_anime_visn(BekkanPanelBase, bpy.types.Panel):
         col = self.layout.column(align=True)
         col.operator("object.add_noise_anim", text="Wiggle（添加/更新Noise）", icon='MOD_NOISE')
         col.operator("object.remove_all_animations_visn", icon='CANCEL')
+        col.operator('object.sync_armature_psr_visn')
 
 
 class VIEW3D_PT_anime_autosway_visn(BekkanPanelBase, bpy.types.Panel):
@@ -229,6 +230,14 @@ class VIEW3D_PT_render_preset_visn(BekkanPanelBase, bpy.types.Panel):
 
 
 # 面板按注册顺序在侧边栏中排列
+class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
+    bl_idname = 'BEKKAN_PT_plugin_debug'
+    bl_label = '插件调试'
+
+    def draw(self, context):
+        self.layout.operator('wm.reload_pond_bekkan_visn')
+
+
 _classes = (
     VIEW3D_PT_parents_visn,
     VIEW3D_PT_stage_visn,
@@ -236,6 +245,7 @@ _classes = (
     VIEW3D_PT_anime_visn,
     VIEW3D_PT_anime_autosway_visn,
     VIEW3D_PT_render_preset_visn,
+    BEKKAN_PT_plugin_debug,
 )
 
 
