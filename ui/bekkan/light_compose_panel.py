@@ -4,6 +4,7 @@
 # （见 ANALYZER_OT_fix_normal_colorspace，同一套算法也用在工程分析的
 # MAT.normal_map_colorspace 检查项，这里单独放一个按钮不用先跑分析）；
 # 双引擎 Cy 白膜适配：core/texture.py，共用一个白膜节点组。
+# 相机角点体积探针：core/light_probe.py。
 # 后续脚本以按钮追加。
 import bpy
 
@@ -19,6 +20,7 @@ class BEKKAN_PT_light_compose(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator('camera.create_volume_probe_visn', icon='LIGHTPROBE_VOLUME')
         layout.operator('material.cycles_clay_visn', icon='NODE_MATERIAL')
         layout.operator('material.base_color_direct_visn', icon='NODE_MATERIAL')
         layout.operator("analyzer.downscale_textures_visn",
