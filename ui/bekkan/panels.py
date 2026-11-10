@@ -45,6 +45,19 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         col = self.layout.column(align=True)
         col.operator("object.fast_camera_visn", icon='CAMERA_DATA')
         col.operator("object.cspzt_camera_visn", icon='VIEW_CAMERA')
+        from ...core.stage import camera_space_enabled
+        camera_mode = camera_space_enabled(context.scene)
+        row = col.row(align=True)
+        row.alert = camera_mode
+        row.operator('view3d.toggle_camera_space_visn',
+                     text='● 视角空间编辑中 · 点击恢复' if camera_mode
+                     else '开启摄像机视角空间编辑',
+                     icon='VIEW_CAMERA', depress=camera_mode)
+        if camera_mode:
+            col.label(text='当前：View 坐标系 / 3D Cursor 枢轴点', icon='INFO')
+        elif (context.scene.transform_orientation_slots[0].type == 'VIEW'
+              and context.scene.tool_settings.transform_pivot_point == 'CURSOR'):
+            col.label(text='当前是 View / 3D Cursor，但没有恢复记录', icon='ERROR')
         col.operator("object.add_light_with_constraint", icon='LIGHT_SPOT')
         col.operator("object.delete_empty_null_visn", icon='X')
         col.operator("camera.create_focus_object", icon='VIEW_CAMERA')

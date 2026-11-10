@@ -7,11 +7,87 @@ import math
 import os
 import platform
 import subprocess
+import json
 import bpy
 
 from mathutils import Vector
 
 from .hierarchy import centro_global
+
+
+_CAMERA_SPACE_KEY = '_pond_bekkan_camera_space_states'
+
+
+def _camera_space_states(wm):
+    """会话状态存于 WindowManager，模块热重载后仍可恢复。"""
+    try:
+        return json.loads(wm.get(_CAMERA_SPACE_KEY, '{}'))
+    except (TypeError, ValueError):
+        return {}
+
+
+def _save_camera_space_states(wm, states):
+    if states:
+        wm[_CAMERA_SPACE_KEY] = json.dumps(states)
+    elif _CAMERA_SPACE_KEY in wm:
+        del wm[_CAMERA_SPACE_KEY]
+
+
+def camera_space_enabled(scene):
+    wm = bpy.context.window_manager
+    return wm is not None and str(scene.session_uid) in _camera_space_states(wm)
+
+
+def _restore_camera_space(scene, state):
+    scene.transform_orientation_slots[0].type = state['orientation']
+    scene.tool_settings.transform_pivot_point = state['pivot']
+    scene.cursor.location = state['cursor']
+
+
+class StageToggleCameraSpace(bpy.types.Operator):
+    """临时以场景活动摄像机为 3D Cursor，使用视图坐标系编辑"""
+    bl_idname = 'view3d.toggle_camera_space_visn'
+    bl_label = '摄像机视角空间编辑'
+    bl_description = '开启时保存当前坐标系、枢轴点与 Cursor 位置并切换到 View/3D Cursor；再次点击恢复'
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene is not None and context.area is not None and context.area.type == 'VIEW_3D'
+
+    def execute(self, context):
+        scene = context.scene
+        wm = context.window_manager
+        key = str(scene.session_uid)
+        states = _camera_space_states(wm)
+        state = states.get(key)
+        if state is not None:
+            _restore_camera_space(scene, state)
+            del states[key]
+            _save_camera_space_states(wm, states)
+            self.report({'INFO'}, '已恢复原坐标系、枢轴点和 3D Cursor 位置')
+            return {'FINISHED'}
+
+        camera = scene.camera
+        if camera is None or camera.type != 'CAMERA':
+            self.report({'WARNING'}, '当前场景没有活动摄像机')
+            return {'CANCELLED'}
+        state = {
+            'orientation': scene.transform_orientation_slots[0].type,
+            'pivot': scene.tool_settings.transform_pivot_point,
+            'cursor': tuple(scene.cursor.location),
+        }
+        try:
+            scene.cursor.location = camera.matrix_world.translation
+            scene.transform_orientation_slots[0].type = 'VIEW'
+            scene.tool_settings.transform_pivot_point = 'CURSOR'
+        except Exception:
+            _restore_camera_space(scene, state)
+            raise
+        states[key] = state
+        _save_camera_space_states(wm, states)
+        self.report({'INFO'}, f'已开启摄像机视角空间编辑：{camera.name}')
+        return {'FINISHED'}
 
 
 class DeleteEmptyNull(bpy.types.Operator):
@@ -547,6 +623,7 @@ class StageCheckerboardLayout(bpy.types.Operator):
 
 
 _classes = (
+    StageToggleCameraSpace,
     DeleteEmptyNull,
     StageClearAllFakeUsers,
     FastCentreCamera,
@@ -567,5 +644,12 @@ def register():
 
 
 def unregister():
+    for wm in bpy.data.window_managers:
+        states = _camera_space_states(wm)
+        for scene in bpy.data.scenes:
+            state = states.pop(str(scene.session_uid), None)
+            if state is not None:
+                _restore_camera_space(scene, state)
+        _save_camera_space_states(wm, {})
     for c in reversed(_classes):
         bpy.utils.unregister_class(c)
