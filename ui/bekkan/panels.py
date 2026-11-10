@@ -238,8 +238,6 @@ class VIEW3D_PT_render_preset_visn(BekkanPanelBase, bpy.types.Panel):
                         text="打开工程所在文件夹", icon='FILE_FOLDER')
         layout.operator("render.open_output_folder",
                         text="打开输出文件夹", icon='FILE_FOLDER')
-        layout.operator("render.open_addon_folder",
-                        text="打开插件所在文件夹", icon='FILE_FOLDER')
 
 
 # 面板按注册顺序在侧边栏中排列
@@ -249,6 +247,8 @@ class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
 
     def draw(self, context):
         self.layout.operator('wm.reload_pond_bekkan_visn')
+        self.layout.operator("render.open_addon_folder",
+                             text="打开插件所在文件夹", icon='FILE_FOLDER')
 
 
 _classes = (
