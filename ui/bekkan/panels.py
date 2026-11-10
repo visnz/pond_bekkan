@@ -88,6 +88,23 @@ class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
                         text="选中该贴图的材质对象", icon='OBJECT_DATA')
 
 
+class VIEW3D_PT_rig_animation_visn(BekkanPanelBase, bpy.types.Panel):
+    bl_idname = 'VIEW3D_PT_rig_animation_visn'
+    bl_label = '🦴 绑定动画'
+
+    @classmethod
+    def poll(cls, context):
+        return module_enabled('show_rig_animation')
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.enabled = context.mode == 'POSE' and context.active_object is not None and context.active_object.type == 'ARMATURE'
+        col.operator('pose.swap_limb_pose_visn', text='左右手姿态交换', icon='ARMATURE_DATA').part = 'ARMS'
+        col.operator('pose.swap_limb_pose_visn', text='左右腿姿态交换', icon='ARMATURE_DATA').part = 'LEGS'
+        if not col.enabled:
+            self.layout.label(text='请选中骨架并进入姿态模式', icon='INFO')
+
+
 class VIEW3D_PT_anime_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_anime_visn"
     bl_label = "🎞 动画类"
@@ -254,6 +271,7 @@ class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
 _classes = (
     VIEW3D_PT_parents_visn,
     VIEW3D_PT_stage_visn,
+    VIEW3D_PT_rig_animation_visn,
     VIEW3D_PT_texture_visn,
     VIEW3D_PT_anime_visn,
     VIEW3D_PT_anime_autosway_visn,

@@ -6,6 +6,7 @@ MODULES = [
     ("show_analyzer", "工程分析"),
     ("show_parents", "上下级"),
     ("show_stage", "搭建类"),
+    ("show_rig_animation", "绑定动画"),
     ("show_texture", "贴图索引"),
     ("show_anime", "动画类"),
     ("show_render_preset", "渲染预设"),

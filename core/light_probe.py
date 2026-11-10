@@ -1,6 +1,72 @@
-# 别馆新增：相机空间中的角点体积探针。只创建控制层级，不自动烘焙。
+# 别馆灯光合成：相机角点体积探针、EV 吸光体及体积探针批量烘焙。
 import bpy
+import re
 from mathutils import Matrix, Vector
+
+
+_ABSORBER_TAG = 'pond_bekkan_ev_absorber'
+_ABSORBER_NAME = re.compile(r'^EV吸光体_(\d+)$')
+
+
+def _absorbers():
+    """复制或重命名后仍可识别；兼容按约定命名的旧物体。"""
+    return [obj for obj in bpy.data.objects
+            if obj.type == 'MESH' and (obj.get(_ABSORBER_TAG) or _ABSORBER_NAME.fullmatch(obj.name))]
+
+
+def _next_absorber_name():
+    numbers = [int(match.group(1)) for obj in bpy.data.objects
+               if (match := _ABSORBER_NAME.fullmatch(obj.name))]
+    number = max(numbers, default=0) + 1
+    while f'EV吸光体_{number:02d}' in bpy.data.objects:
+        number += 1
+    return f'EV吸光体_{number:02d}'
+
+
+def _empty_output_material():
+    for material in bpy.data.materials:
+        if (material.get(_ABSORBER_TAG) and material.use_nodes
+                and not any(node.type == 'OUTPUT_MATERIAL' for node in material.node_tree.nodes)):
+            return material
+    material = bpy.data.materials.new('EV吸光体_无输出')
+    material.use_nodes = True
+    material.node_tree.nodes.clear()
+    material[_ABSORBER_TAG] = True
+    return material
+
+
+def create_ev_absorber(context):
+    """在 3D Cursor 创建 2m 立方体；不改变现有选择或游标位置。"""
+    collection = context.collection
+    if collection is None or not collection.is_editable:
+        collection = context.scene.collection
+    name = _next_absorber_name()
+    mesh = bpy.data.meshes.new(name)
+    obj = None
+    try:
+        mesh.from_pydata(
+            [(-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1),
+             (1, -1, -1), (1, -1, 1), (1, 1, -1), (1, 1, 1)],
+            [],
+            [(2, 6, 4, 0), (5, 7, 3, 1), (4, 5, 1, 0),
+             (3, 7, 6, 2), (1, 3, 2, 0), (6, 7, 5, 4)],
+        )
+        mesh.update()
+        obj = bpy.data.objects.new(name, mesh)
+        collection.objects.link(obj)
+        obj.location = context.scene.cursor.location.copy()
+        obj.data.materials.append(_empty_output_material())
+        obj[_ABSORBER_TAG] = True
+        obj.display_type = 'WIRE'
+        obj.visible_camera = False
+        obj.visible_shadow = False
+        obj.hide_render = True
+    except Exception:
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
+        raise
+    return obj
 
 
 def _camera_for_context(context):
@@ -208,7 +274,80 @@ class CAMERA_OT_align_volume_probe_visn(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_classes = (CAMERA_OT_create_volume_probe_visn, CAMERA_OT_align_volume_probe_visn)
+class OBJECT_OT_create_ev_absorber_visn(bpy.types.Operator):
+    bl_idname = 'object.create_ev_absorber_visn'
+    bl_label = '添加EV吸光体'
+    bl_description = '在 3D Cursor 创建无材质输出的立方体；视口线框，默认不参与渲染、相机和阴影'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and context.scene is not None
+
+    def execute(self, context):
+        try:
+            obj = create_ev_absorber(context)
+        except Exception as exc:
+            self.report({'ERROR'}, f'创建EV吸光体失败：{exc}')
+            return {'CANCELLED'}
+        for selected in context.selected_objects:
+            selected.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        self.report({'INFO'}, f'已创建 {obj.name}')
+        return {'FINISHED'}
+
+
+class OBJECT_OT_bake_ev_absorbers_visn(bpy.types.Operator):
+    bl_idname = 'object.bake_ev_absorbers_visn'
+    bl_label = '烘焙吸光体'
+    bl_description = '临时显示所有EV吸光体，烘焙当前视图层的全部Volume探针，结束后隐藏吸光体'
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'OBJECT' or context.scene is None:
+            cls.poll_message_set('请在物体模式下烘焙')
+            return False
+        if context.scene.render.engine != 'BLENDER_EEVEE':
+            cls.poll_message_set('Volume 探针烘焙需要 EEVEE 渲染引擎')
+            return False
+        return True
+
+    def execute(self, context):
+        probes = [obj for obj in context.view_layer.objects
+                  if obj.type == 'LIGHT_PROBE' and obj.data.type == 'VOLUME']
+        if not probes:
+            self.report({'WARNING'}, '当前视图层没有 Volume Light Probe')
+            return {'CANCELLED'}
+        absorbers = _absorbers()
+        try:
+            for obj in absorbers:
+                obj.hide_render = False
+            context.view_layer.update()
+            # EXEC_DEFAULT 是 Blender 自带的同步烘焙路径；返回时才恢复可见性。
+            result = bpy.ops.object.lightprobe_cache_bake('EXEC_DEFAULT', subset='ALL')
+        except Exception as exc:
+            self.report({'ERROR'}, f'Volume 探针烘焙失败：{exc}')
+            return {'CANCELLED'}
+        finally:
+            for obj in absorbers:
+                if obj.name in bpy.data.objects:
+                    obj.hide_render = True
+            context.view_layer.update()
+        if 'FINISHED' not in result:
+            self.report({'WARNING'}, 'Volume 探针烘焙未完成，吸光体已重新隐藏')
+            return {'CANCELLED'}
+        self.report({'INFO'}, f'已烘焙 {len(probes)} 个 Volume 探针；{len(absorbers)} 个EV吸光体已重新隐藏')
+        return {'FINISHED'}
+
+
+_classes = (
+    CAMERA_OT_create_volume_probe_visn,
+    CAMERA_OT_align_volume_probe_visn,
+    OBJECT_OT_create_ev_absorber_visn,
+    OBJECT_OT_bake_ev_absorbers_visn,
+)
 
 
 def register():

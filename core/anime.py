@@ -2,7 +2,9 @@
 # + AutoSway 骨骼摆动（合并自独立插件 autosway.py，纯平移，收进动画类面板的子面板）
 # 面板在 ui/bekkan/panels.py
 import random  # type: ignore
+import copy
 import bpy  # type: ignore
+from mathutils import Matrix
 from bpy.props import FloatProperty, EnumProperty, PointerProperty, StringProperty  # type: ignore
 
 # 需要在 execute/invoke 间同步的参数字段
@@ -434,8 +436,103 @@ class OBJECT_OT_sync_armature_psr(bpy.types.Operator):
         return {'FINISHED'} if copied else {'CANCELLED'}
 
 
+_ARM_WORDS = ('shoulder', 'clavicle', 'collar', 'arm', 'elbow', 'forearm',
+              'wrist', 'hand', 'palm', 'finger', 'thumb', 'index', 'middle',
+              'ring', 'pinky', 'little', '腕', '肩', '肘', '手', '指')
+_LEG_WORDS = ('hip', 'pelvis', 'thigh', 'leg', 'shin', 'calf', 'knee',
+              'ankle', 'foot', 'toe', 'heel', 'ball', '胯', '髋', '腿', '膝', '脚', '足', '趾')
+
+
+def _limb_pose_targets(rig, part):
+    """Blender 左右命名走原生镜像；中文/日文左右命名按姿态空间矩阵镜像。"""
+    names = {bone.name for bone in rig.pose.bones}
+    words = _ARM_WORDS if part == 'ARMS' else _LEG_WORDS
+    rigify = bool(rig.data.get('rig_id') or rig.get('rig_id'))
+    native = set()
+    manual = {}
+    for name in names:
+        if rigify and (name.startswith(('DEF-', 'MCH-', 'ORG-', 'VIS-', 'VIS_'))
+                       or '_ik_target.' in name):
+            continue
+        if not any(word in name.lower() for word in words):
+            continue
+        partner = bpy.utils.flip_name(name)
+        if partner != name and partner in names:
+            native.update((name, partner))
+        elif '左' in name and name.replace('左', '右', 1) in names:
+            manual[name] = name.replace('左', '右', 1)
+        elif '右' in name and name.replace('右', '左', 1) in names:
+            manual[name] = name.replace('右', '左', 1)
+    if part == 'LEGS' and (native or manual):
+        # Rigify 的 hips 和普通骨架的中心 pelvis 自身也要作 X 镜像。
+        for name in ('hips', 'Hips', 'pelvis', 'Pelvis', 'hip', 'Hip', '骨盆', '胯'):
+            if name in names:
+                native.add(name)
+    return native, manual
+
+
+class POSE_OT_swap_limb_pose_visn(bpy.types.Operator):
+    bl_idname = 'pose.swap_limb_pose_visn'
+    bl_label = '左右肢体姿态镜像交换'
+    bl_description = '将活动骨架对应肢体的左右姿态水平镜像交换，包含 Rigify 控制骨和 IK/FK 自定义属性'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    part: EnumProperty(
+        name='部位',
+        items=[('ARMS', '左右手与肩膀', ''), ('LEGS', '左右腿与胯部', '')],
+        default='ARMS',
+    )  # type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'POSE' and context.active_object is not None
+                and context.active_object.type == 'ARMATURE'
+                and context.active_object.is_editable)
+
+    def execute(self, context):
+        rig = context.active_object
+        native, manual = _limb_pose_targets(rig, self.part)
+        if not native and not manual:
+            self.report({'WARNING'}, '没有找到左右成对的肢体骨骼；支持 .L/.R、Left/Right 或 左/右命名')
+            return {'CANCELLED'}
+        selected = {bone.name: bone.select for bone in rig.pose.bones}
+        mirror = Matrix.Diagonal((-1, 1, 1, 1))
+        manual_matrices = {name: rig.pose.bones[name].matrix.copy() for name in manual}
+        manual_props = {name: copy.deepcopy(dict(rig.pose.bones[name].items())) for name in manual}
+        try:
+            if native:
+                for bone in rig.pose.bones:
+                    bone.select = bone.name in native
+                if 'FINISHED' not in bpy.ops.pose.copy():
+                    self.report({'ERROR'}, '复制肢体姿态失败')
+                    return {'CANCELLED'}
+                if 'FINISHED' not in bpy.ops.pose.paste(flipped=True, selected_mask=True):
+                    self.report({'ERROR'}, '镜像交换姿态失败')
+                    return {'CANCELLED'}
+            # 父骨先写，避免子骨矩阵因父级姿态更新而偏移。
+            depth = lambda bone: len(bone.parent_recursive)
+            for name in sorted(manual, key=lambda item: depth(rig.pose.bones[item])):
+                bone = rig.pose.bones[name]
+                partner = manual[name]
+                bone.matrix = mirror @ manual_matrices[partner] @ mirror
+                for key, value in manual_props[partner].items():
+                    if key != '_RNA_UI':
+                        bone[key] = value
+            context.view_layer.update()
+        except Exception as exc:
+            self.report({'ERROR'}, f'镜像交换姿态失败：{exc}')
+            return {'CANCELLED'}
+        finally:
+            for bone in rig.pose.bones:
+                bone.select = selected[bone.name]
+        label = '双手与肩膀' if self.part == 'ARMS' else '双腿与胯部'
+        self.report({'INFO'}, f'已镜像交换{label}：{len(native) + len(manual)} 根骨骼')
+        return {'FINISHED'}
+
+
 _classes = (
     OBJECT_OT_sync_armature_psr,
+    POSE_OT_swap_limb_pose_visn,
     OBJECT_OT_add_noise_anim,
     NoiseAnimSettings,
     RemoveAllAnimations,
