@@ -214,6 +214,70 @@ def selected_images_to_non_color(tree):
     return changed, already, skipped
 
 
+def _driver_referenced_nodes(tree, nodes):
+    """保护原生驱动变量引用的节点（含其他数据块上的驱动），不执行表达式。"""
+    protected = set()
+    paths = {node.path_from_id(): node for node in nodes}
+    # all_ids 不包含材质等数据块内嵌的节点树，需补上。
+    ids = set(bpy.data.all_ids)
+    ids.update(getattr(owner, 'node_tree', None) for owner in tuple(ids))
+    ids.add(tree)
+    for owner in ids:
+        animation = getattr(owner, 'animation_data', None)
+        for curve in getattr(animation, 'drivers', ()):
+            for variable in curve.driver.variables:
+                for target in variable.targets:
+                    target_id = getattr(target, 'id', None)
+                    path = getattr(target, 'data_path', '')
+                    if target_id != tree:
+                        if (getattr(target_id, 'node_tree', None) != tree
+                                or not path.startswith('node_tree.')):
+                            continue
+                        path = path[len('node_tree.'):]
+                    if not path.startswith('nodes['):
+                        continue
+                    node = next((node for prefix, node in paths.items()
+                                 if path == prefix or path.startswith(prefix + '.')
+                                 or path.startswith(prefix + '[')), None)
+                    if node is None:
+                        # 数字下标会因删除别的节点而变化；未知节点路径同样保守保留全树。
+                        return set(nodes)
+                    protected.add(node)
+    return protected
+
+
+def select_nodes_unrelated_to_output(tree):
+    """只选本层没有通向任何输出的节点；不分析常量、组内插口或任意 Python 引用。"""
+    nodes = list(tree.nodes)
+    outputs = {node for node in nodes
+               if node.type.startswith('OUTPUT_') or node.type == 'GROUP_OUTPUT'}
+    if not outputs:
+        # 没有判断依据时保持原选择，不能把整棵树误当成废弃分支。
+        raise ValueError('当前编辑层没有输出节点，已保持原选择')
+
+    incoming = defaultdict(set)
+    for link in tree.links:
+        # 连线即保留：不根据 mute、is_valid、Mix 常量或当前渲染器做激进裁剪。
+        incoming[link.to_node].add(link.from_node)
+    required = set()
+    pending = list(outputs | _driver_referenced_nodes(tree, nodes))
+    while pending:
+        node = pending.pop()
+        if node in required:
+            continue
+        required.add(node)
+        pending.extend(incoming[node] - required)
+
+    unrelated = {node for node in nodes if node not in required and node.type != 'FRAME'}
+    # 替换选择而非追加；零候选也清掉旧选择，避免误删此前选中的有效节点。
+    active = tree.nodes.active
+    for node in nodes:
+        node.select = node in unrelated
+    tree.nodes.active = active if active in unrelated else next(
+        (node for node in nodes if node in unrelated), None)
+    return len(unrelated)
+
+
 class _MaterialShaderOperator:
     @classmethod
     def poll(cls, context):
@@ -269,7 +333,27 @@ class NODE_OT_selected_images_non_color_visn(_MaterialShaderOperator, bpy.types.
         return {'FINISHED'}
 
 
-_classes = (NODE_OT_arrange_material_visn, NODE_OT_selected_images_non_color_visn)
+class NODE_OT_select_unrelated_shader_nodes_visn(_MaterialShaderOperator, bpy.types.Operator):
+    bl_idname = 'node.select_unrelated_shader_nodes_visn'
+    bl_label = '选择与输出无关的节点'
+    bl_description = ('选中当前编辑层中未通向任何输出的节点；保留框架及驱动变量引用，'
+                      '只选择不删除，支持撤销')
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        try:
+            count = select_nodes_unrelated_to_output(current_material_tree(context))
+        except ValueError as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+        context.area.tag_redraw()
+        self.report({'INFO'}, f'已选中 {count} 个与输出无关的节点' if count
+                    else '未发现与输出无关的节点，已清空选择')
+        return {'FINISHED'}
+
+
+_classes = (NODE_OT_arrange_material_visn, NODE_OT_selected_images_non_color_visn,
+            NODE_OT_select_unrelated_shader_nodes_visn)
 
 
 def register():

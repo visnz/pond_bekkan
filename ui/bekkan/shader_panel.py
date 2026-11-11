@@ -19,6 +19,7 @@ class BEKKAN_PT_shader_scripts(bpy.types.Panel):
         layout = self.layout
         layout.operator('node.arrange_material_visn', icon='NODETREE')
         layout.operator('node.selected_images_non_color_visn', icon='IMAGE_DATA')
+        layout.operator('node.select_unrelated_shader_nodes_visn', icon='RESTRICT_SELECT_OFF')
 
 
 def register():

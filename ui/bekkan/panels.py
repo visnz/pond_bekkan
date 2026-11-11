@@ -43,6 +43,8 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
 
     def draw(self, context):
         col = self.layout.column(align=True)
+        col.operator('view3d.setup_workspace_visn', icon='SETTINGS')
+        col.separator()
         col.operator("object.fast_camera_visn", icon='CAMERA_DATA')
         col.operator("object.cspzt_camera_visn", icon='VIEW_CAMERA')
         from ...core.stage import camera_space_enabled
