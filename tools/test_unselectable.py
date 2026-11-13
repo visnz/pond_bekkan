@@ -39,15 +39,25 @@ def new(name, collection=None):
 scene = bpy.context.scene
 initial = new('InitiallyLocked')
 initial.hide_select = True
+ordinary = scene.objects['Cube']
+ordinary.display_type = 'WIRE'
 addon.register()
 registered = True
 try:
+    assert bpy.app.timers.is_registered(core._initial_display_sync)
+    assert core._initial_display_sync() is None  # 后台模式手动执行首次延迟同步。
     assert shown() == {initial}, '启用前已锁定的对象应自动进入列表'
+    assert initial.display_type == 'BOUNDS', '启用前已有禁选对象应切为 Bounds'
+    assert ordinary.display_type == 'WIRE', '普通可选对象的显示方式不得被覆盖'
     unlocked = new('Unlocked')
     assert unlocked not in shown()
     unlocked.hide_select = True
+    bpy.context.view_layer.update()
+    assert unlocked.display_type == 'BOUNDS', '外部脚本关闭可选择性也应同步 Bounds'
     assert shown() == {initial, unlocked}, '直接改原生可选择性，无需执行添加/刷新操作'
     unlocked.hide_select = False
+    bpy.context.view_layer.update()
+    assert unlocked.display_type == 'TEXTURED', '外部解锁应切回 Textured'
     assert shown() == {initial}
 
     bpy.context.view_layer.update()
@@ -55,18 +65,40 @@ try:
     assert not initial.hide_select and initial.bekkan_selection_adjusting
     assert initial in shown() and bpy.context.active_object == initial
     assert set(bpy.context.selected_objects) == {initial}
+    assert initial.display_type == 'TEXTURED'
+    # 列表高亮使用原集合索引；点击列表行也要解锁并切换活跃对象。
+    unlocked.hide_select = True
+    area = next(a for a in bpy.context.screen.areas if a.type == 'VIEW_3D')
+    region = next(r for r in area.regions if r.type == 'UI')
+    index = list(scene.objects).index(unlocked)
+    scene.bekkan_unselectable_index = index
+    assert bpy.context.active_object == initial, '非侧边栏脚本修改索引不得扰动选择'
+    assert unlocked.hide_select and not unlocked.bekkan_selection_adjusting
+    with bpy.context.temp_override(area=area, region=region):
+        scene.bekkan_unselectable_index = index
+        assert bpy.context.active_object == unlocked
+        assert set(bpy.context.selected_objects) == {unlocked}
+        assert not unlocked.hide_select and unlocked.bekkan_selection_adjusting
+        assert unlocked.display_type == 'TEXTURED'
+        assert action(initial, 'EDIT') == {'FINISHED'}
+        scene.bekkan_unselectable_index = index
+        assert bpy.context.active_object == unlocked, '同一行再次点击也应激活'
+    assert action(unlocked, 'FORGET') == {'FINISHED'}
+    assert action(initial, 'EDIT') == {'FINISHED'}
     initial.name = 'RenamedDuringAdjustment'
     assert shown(search='renamed') == {initial}
     assert not shown(search='no-match')
     initial.location = (2, 3, 4)
     assert action(initial, 'LOCK') == {'FINISHED'}
     assert initial.hide_select and not initial.bekkan_selection_adjusting
+    assert initial.display_type == 'BOUNDS', '面板锁回应立即显示为 Bounds'
     assert initial in shown() and not initial.select_get()
     assert tuple(initial.location) == (2, 3, 4)
     assert action(initial, 'EDIT') == {'FINISHED'}
     assert action(initial, 'FORGET') == {'FINISHED'}
     assert initial not in shown() and initial in scene.objects.values()
     assert not initial.hide_select
+    assert initial.display_type == 'TEXTURED'
 
     # 隐藏/集合禁选时不解锁、不扰动当前选择；有其他未禁选集合路径时允许。
     blocked_collection = bpy.data.collections.new('SelectionBlockedCollection')
@@ -76,9 +108,11 @@ try:
     blocked.hide_select = True
     bpy.context.view_layer.update()
     selected_before = set(bpy.context.selected_objects)
+    display_before = blocked.display_type
     assert action(blocked, 'EDIT') == {'CANCELLED'}
     assert blocked.hide_select and not blocked.bekkan_selection_adjusting
     assert set(bpy.context.selected_objects) == selected_before
+    assert blocked.display_type == display_before, '激活失败不得改变显示方式'
     scene.collection.objects.link(blocked)
     bpy.context.view_layer.update()
     assert action(blocked, 'EDIT') == {'FINISHED'}
@@ -121,21 +155,30 @@ try:
         blocked = bpy.context.scene.objects[kept_name]
         assert blocked.bekkan_selection_adjusting and blocked in shown()
         assert not blocked.hide_select
+        assert blocked.display_type == 'TEXTURED'
         assert core._on_load in bpy.app.handlers.load_post
         assert action(blocked, 'LOCK') == {'FINISHED'}
+        assert blocked.display_type == 'BOUNDS'
 
     addon.unregister()
     registered = False
     assert core._on_load not in bpy.app.handlers.load_post
     assert core._on_history not in bpy.app.handlers.undo_post
     assert core._on_history not in bpy.app.handlers.redo_post
+    assert core._on_depsgraph not in bpy.app.handlers.depsgraph_update_post
+    assert not core._display_lock_states
+    assert not bpy.app.timers.is_registered(core._initial_display_sync)
     assert not hasattr(bpy.types.Object, 'bekkan_selection_adjusting')
     addon.register()
     registered = True
+    assert core._initial_display_sync() is None
     assert bpy.app.handlers.load_post.count(core._on_load) == 1
     assert bpy.app.handlers.undo_post.count(core._on_history) == 1
+    assert bpy.app.handlers.depsgraph_update_post.count(core._on_depsgraph) == 1
     assert blocked in shown()
-    print('PASS_UNSELECTABLE: live filtering, search, edit/relock/forget, collections, hidden, scenes, deletion, mode switch, file reload, lifecycle')
+    assert blocked.display_type == 'BOUNDS'
+    assert bpy.context.scene.objects['Cube'].display_type == 'WIRE'
+    print('PASS_UNSELECTABLE: live filtering, display bounds/textured, search, edit/relock/forget, collections, hidden, scenes, deletion, mode switch, file reload, lifecycle')
 finally:
     if registered:
         addon.unregister()

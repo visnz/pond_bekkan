@@ -1,11 +1,14 @@
-# 别馆灯光合成：相机角点体积探针、EV 吸光体及体积探针批量烘焙。
+# 别馆灯光合成：相机角点体积探针、EV 吸光体、隐形遮光板及探针烘焙。
 import bpy
 import re
 from mathutils import Matrix, Vector
 
+from .hierarchy import centro_global
+
 
 _ABSORBER_TAG = 'pond_bekkan_ev_absorber'
 _ABSORBER_NAME = re.compile(r'^EV吸光体_(\d+)$')
+_BLOCKER_TAG = 'pond_bekkan_invisible_blocker'
 
 
 def _absorbers():
@@ -67,6 +70,80 @@ def create_ev_absorber(context):
         bpy.data.meshes.remove(mesh)
         raise
     return obj
+
+
+def _blocker_material():
+    """复用未被修改的遮光板空输出材质；返回材质及是否为本次新建。"""
+    for material in bpy.data.materials:
+        if material.get(_BLOCKER_TAG) and material.use_nodes:
+            nodes = material.node_tree.nodes
+            if len(nodes) == 1 and nodes[0].type == 'OUTPUT_MATERIAL' and not material.node_tree.links:
+                return material, False
+    material = bpy.data.materials.new('隐形遮光板_空输出')
+    try:
+        material.use_nodes = True
+        material.node_tree.nodes.clear()
+        material.node_tree.nodes.new('ShaderNodeOutputMaterial')
+        material[_BLOCKER_TAG] = True
+    except Exception:
+        bpy.data.materials.remove(material)
+        raise
+    return material, True
+
+
+def create_invisible_blocker(context):
+    """沿用中心约束灯光的世界原点均值与父级跟踪方式，不改变当前选择。"""
+    selected = tuple(context.selected_objects)
+    if not selected:
+        raise ValueError('请先选中用于确定中心的物体')
+    collection = context.scene.collection
+    if not collection.is_editable:
+        raise ValueError('当前场景根集合不可编辑')
+    context.view_layer.update()
+    center = centro_global(selected)
+    control = plane = mesh = material = None
+    created_material = False
+    try:
+        control = bpy.data.objects.new('隐形遮光板组', None)
+        collection.objects.link(control)
+        control.location = center
+        mesh = bpy.data.meshes.new('隐形遮光板')
+        mesh.from_pydata([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], [], [(0, 1, 2, 3)])
+        mesh.update()
+        plane = bpy.data.objects.new('隐形遮光板', mesh)
+        collection.objects.link(plane)
+        plane.parent = control
+        plane.matrix_parent_inverse = Matrix.Identity(4)
+        plane.matrix_basis = Matrix.Identity(4)
+        track = plane.constraints.new(type='DAMPED_TRACK')
+        track.target = control
+        track.track_axis = 'TRACK_NEGATIVE_Z'
+        material, created_material = _blocker_material()
+        mesh.materials.append(material)
+        plane[_BLOCKER_TAG] = True
+        plane.display_type = 'BOUNDS'
+        if hasattr(plane, 'visible_camera'):
+            plane.visible_camera = False
+        if hasattr(plane, 'visible_shadow'):
+            plane.visible_shadow = True
+        plane.hide_render = False
+        space = context.space_data
+        if space and space.type == 'VIEW_3D' and space.local_view:
+            control.local_view_set(space, True)
+            plane.local_view_set(space, True)
+        context.view_layer.update()
+    except Exception:
+        # 只回滚本次对象、网格和新材质，不清理用户现有数据。
+        if plane is not None:
+            bpy.data.objects.remove(plane, do_unlink=True)
+        if mesh is not None:
+            bpy.data.meshes.remove(mesh)
+        if control is not None:
+            bpy.data.objects.remove(control, do_unlink=True)
+        if created_material:
+            bpy.data.materials.remove(material)
+        raise
+    return control, plane
 
 
 def _camera_for_context(context):
@@ -298,6 +375,39 @@ class OBJECT_OT_create_ev_absorber_visn(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_create_invisible_blocker_visn(bpy.types.Operator):
+    bl_idname = 'object.create_invisible_blocker_visn'
+    bl_label = '创建隐形遮光板'
+    bl_description = (
+        '在所选物体的中心创建空物体和 Plane，移动 Plane 自动朝向中心。'
+        '材质仅保留空 Material Output，显示为 Bounds；关闭 Cycles Camera 射线可见性并保留阴影'
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if context.mode != 'OBJECT' or context.scene is None:
+            cls.poll_message_set('请在物体模式下创建遮光板')
+            return False
+        if not context.selected_objects:
+            cls.poll_message_set('请先选中用于确定中心的物体')
+            return False
+        return True
+
+    def execute(self, context):
+        try:
+            control, plane = create_invisible_blocker(context)
+        except Exception as exc:
+            self.report({'ERROR'}, f'创建隐形遮光板失败：{exc}')
+            return {'CANCELLED'}
+        for selected in context.selected_objects:
+            selected.select_set(False)
+        plane.select_set(True)
+        context.view_layer.objects.active = plane
+        self.report({'INFO'}, '已创建隐形遮光板；移动/缩放 Plane 调整遮光范围，移动空物体调整中心')
+        return {'FINISHED'}
+
+
 class OBJECT_OT_bake_ev_absorbers_visn(bpy.types.Operator):
     bl_idname = 'object.bake_ev_absorbers_visn'
     bl_label = '烘焙吸光体'
@@ -346,6 +456,7 @@ _classes = (
     CAMERA_OT_create_volume_probe_visn,
     CAMERA_OT_align_volume_probe_visn,
     OBJECT_OT_create_ev_absorber_visn,
+    OBJECT_OT_create_invisible_blocker_visn,
     OBJECT_OT_bake_ev_absorbers_visn,
 )
 

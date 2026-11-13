@@ -11,9 +11,10 @@ def _reload_addon_from_disk():
     old = sys.modules.get(package)
     persistent = getattr(old, '__addon_persistent__', False)
     errors = []
-    def on_error():
+    def on_error(exc=None):
         import traceback
-        errors.append(traceback.format_exc())
+        errors.append(''.join(traceback.format_exception(exc)) if exc is not None
+                      else traceback.format_exc())
     addon_utils.disable(package, default_set=False, refresh_handled=True, handle_error=on_error)
     if errors:
         raise RuntimeError('注销插件失败：' + '\n'.join(errors))

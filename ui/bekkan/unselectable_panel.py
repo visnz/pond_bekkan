@@ -67,7 +67,8 @@ class BEKKAN_PT_unselectable(bpy.types.Panel):
             'BEKKAN_UL_unselectable', '', scene, 'objects',
             scene, 'bekkan_unselectable_index', rows=6, maxrows=10,
         )
-        layout.label(text='点名称解锁选中，调整后点右侧锁回')
+        layout.label(text='点对象解锁并激活，调整后点右侧锁回')
+        layout.label(text='禁选：Bounds · 激活：Textured')
 
 
 _classes = (BEKKAN_UL_unselectable, BEKKAN_PT_unselectable)

@@ -4,6 +4,7 @@ from bpy.app.handlers import persistent
 
 
 _msgbus_owner = object()
+_display_lock_states = {}
 
 
 def managed_object(obj):
@@ -11,7 +12,7 @@ def managed_object(obj):
 
 
 def _tag_redraw(_self=None, _context=None):
-    manager = bpy.context.window_manager
+    manager = getattr(bpy.context, 'window_manager', None)
     if manager:
         for window in manager.windows:
             for area in window.screen.areas:
@@ -19,25 +20,70 @@ def _tag_redraw(_self=None, _context=None):
                     area.tag_redraw()
 
 
+def _sync_object_display(obj):
+    """只联动禁选对象和刚解锁对象，不覆盖普通可选对象的自定义显示。"""
+    uid = obj.session_uid
+    was_locked = _display_lock_states.get(uid, False)
+    _display_lock_states[uid] = obj.hide_select
+    target = 'BOUNDS' if obj.hide_select else (
+        'TEXTURED' if was_locked or getattr(obj, 'bekkan_selection_adjusting', False) else None)
+    if (target and obj.is_editable and hasattr(obj, 'display_type')
+            and not obj.is_property_readonly('display_type') and obj.display_type != target):
+        obj.display_type = target
+        return True
+    return False
+
+
+def _sync_display_modes():
+    objects = getattr(bpy.data, 'objects', None)
+    if objects is None:
+        return False  # addon_utils.enable 的 RestrictBlend 阶段不能读取工程。
+    live_uids = set()
+    for obj in objects:
+        live_uids.add(obj.session_uid)
+        _sync_object_display(obj)
+    for uid in _display_lock_states.keys() - live_uids:
+        del _display_lock_states[uid]
+    _tag_redraw()
+    return True
+
+
+def _initial_display_sync():
+    """注册结束后再同步已有对象；若暂时仍受限，下一次事件循环重试。"""
+    return None if _sync_display_modes() else 0.1
+
+
+@persistent
+def _on_depsgraph(_scene, depsgraph):
+    # 原生 UI 和脚本均可改 hide_select；只检查本次更新的对象，避免每帧全场景扫描。
+    changed = False
+    for update in depsgraph.updates:
+        if isinstance(update.id, bpy.types.Object):
+            changed = _sync_object_display(update.id.original) or changed
+    if changed:
+        _tag_redraw()
+
+
 def _subscribe():
     bpy.msgbus.clear_by_owner(_msgbus_owner)
-    for prop in ('hide_select', 'name'):
+    for prop, callback in (('hide_select', _sync_display_modes), ('name', _tag_redraw)):
         bpy.msgbus.subscribe_rna(
             key=(bpy.types.Object, prop), owner=_msgbus_owner,
-            args=(), notify=_tag_redraw,
+            args=(), notify=callback,
         )
 
 
 @persistent
 def _on_load(_dummy):
     # 读文件会清空消息订阅；重新订阅后立即显示新场景已有的禁选对象。
+    _display_lock_states.clear()
     _subscribe()
-    _tag_redraw()
+    _sync_display_modes()
 
 
 @persistent
 def _on_history(_dummy):
-    _tag_redraw()
+    _sync_display_modes()
 
 
 def _has_selectable_collection_path(obj, view_layer):
@@ -68,6 +114,7 @@ def unlock_and_select(context, obj):
 
     was_locked = obj.hide_select
     was_adjusting = obj.bekkan_selection_adjusting
+    was_display = obj.display_type
     selected = tuple(context.selected_objects)
     active = context.view_layer.objects.active
     try:
@@ -79,14 +126,33 @@ def unlock_and_select(context, obj):
         if not obj.select_get():
             raise ValueError('对象仍不可选择，请检查集合或视图层限制')
         context.view_layer.objects.active = obj
+        _sync_object_display(obj)
     except Exception:
         obj.select_set(False)
         obj.hide_select = was_locked
         obj.bekkan_selection_adjusting = was_adjusting
+        if obj.display_type != was_display:
+            obj.display_type = was_display
         for other in selected:
             other.select_set(True)
         context.view_layer.objects.active = active
         raise
+
+
+def _activate_list_item(scene, context):
+    """原生列表行的高亮点击也要解锁并激活；非面板上下文不改变现场选择。"""
+    space = context.space_data
+    region = context.region
+    if (context.scene != scene or context.mode != 'OBJECT' or not space
+            or space.type != 'VIEW_3D' or not region or region.type != 'UI'):
+        return
+    index = scene.bekkan_unselectable_index
+    if not 0 <= index < len(scene.objects):
+        return
+    obj = scene.objects[index]  # template_list 的索引对应原集合，不是过滤/排序后的行号。
+    if managed_object(obj):
+        bpy.ops.object.manage_unselectable_visn(
+            'EXEC_DEFAULT', target_uid=str(obj.session_uid), action='EDIT')
 
 
 class OBJECT_OT_manage_unselectable_visn(bpy.types.Operator):
@@ -96,7 +162,7 @@ class OBJECT_OT_manage_unselectable_visn(bpy.types.Operator):
 
     target_uid: bpy.props.StringProperty(options={'HIDDEN'})
     action: bpy.props.EnumProperty(
-        items=[('EDIT', '解锁并选中', ''), ('LOCK', '重新锁定', ''),
+        items=[('EDIT', '解锁并激活', ''), ('LOCK', '重新锁定', ''),
                ('FORGET', '保持可选并移出列表', '')],
         options={'HIDDEN'},
     )
@@ -104,8 +170,8 @@ class OBJECT_OT_manage_unselectable_visn(bpy.types.Operator):
     @classmethod
     def description(cls, context, properties):
         return {
-            'EDIT': '解锁并选中此对象，保留在列表中以便调整后重新锁定',
-            'LOCK': '重新禁止选择此对象，结束临时调整',
+            'EDIT': '切回 Textured，解锁、选中并设为当前活跃对象，保留在列表中以便重新锁定',
+            'LOCK': '重新禁止选择此对象并显示为 Bounds，结束临时调整',
             'FORGET': '保持对象可选，并将它从调整列表中移除；不会删除物体',
         }.get(properties.action, '管理不可选对象')
 
@@ -131,6 +197,7 @@ class OBJECT_OT_manage_unselectable_visn(bpy.types.Operator):
             elif self.action == 'LOCK':
                 obj.hide_select = True
                 obj.bekkan_selection_adjusting = False
+                _sync_object_display(obj)
                 if obj.name in context.view_layer.objects:
                     obj.select_set(False)
                     if context.view_layer.objects.active == obj:
@@ -153,23 +220,30 @@ def register():
         description='从不可选对象面板解锁后继续保留，方便调整完重新锁定',
         update=_tag_redraw,
     )
-    bpy.types.Scene.bekkan_unselectable_index = bpy.props.IntProperty(default=0, min=0)
+    bpy.types.Scene.bekkan_unselectable_index = bpy.props.IntProperty(
+        default=0, min=0, update=_activate_list_item)
     bpy.utils.register_class(OBJECT_OT_manage_unselectable_visn)
     _subscribe()
     bpy.app.handlers.load_post.append(_on_load)
     bpy.app.handlers.undo_post.append(_on_history)
     bpy.app.handlers.redo_post.append(_on_history)
+    bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
+    bpy.app.timers.register(_initial_display_sync, first_interval=0.1)
 
 
 def unregister():
+    if bpy.app.timers.is_registered(_initial_display_sync):
+        bpy.app.timers.unregister(_initial_display_sync)
     bpy.msgbus.clear_by_owner(_msgbus_owner)
     for handlers, callback in (
         (bpy.app.handlers.load_post, _on_load),
         (bpy.app.handlers.undo_post, _on_history),
         (bpy.app.handlers.redo_post, _on_history),
+        (bpy.app.handlers.depsgraph_update_post, _on_depsgraph),
     ):
         if callback in handlers:
             handlers.remove(callback)
     bpy.utils.unregister_class(OBJECT_OT_manage_unselectable_visn)
     del bpy.types.Scene.bekkan_unselectable_index
     del bpy.types.Object.bekkan_selection_adjusting
+    _display_lock_states.clear()

@@ -2,8 +2,85 @@
 # 按钮指向 core 的 op；选择父级已从废弃的 object.select_parent_visn 重接到
 # pond.select_parents（语义等价，见 合并对照清单.md 第 4 节）。
 import bpy
+import json
 
 from .prefs import module_enabled
+
+
+class BEKKAN_OT_workspace_setup_report(bpy.types.Operator):
+    bl_idname = 'wm.workspace_setup_report_visn'
+    bl_label = 'Setup 执行报告'
+    bl_description = '查看上次 setup 实际修改的设置、原本一致的设置和场景处理结果'
+    bl_options = {'INTERNAL'}
+
+    report_json: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    report_tab: bpy.props.EnumProperty(name='报告内容', items=(
+        ('CHANGED', '本次修改', '显示运行前与运行后的具体设置值'),
+        ('UNCHANGED', '原本一致', '这些设置运行前就已符合 setup'),
+        ('SCENE', '场景处理', '查看新增、保留和跳过的内容'),
+    ), default='CHANGED', options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        if not self.report_json:
+            from ...core.workspace_setup import last_setup_report
+            report = last_setup_report(context.scene)
+            if report is None:
+                self.report({'INFO'}, '当前场景还没有 setup 执行记录')
+                return {'CANCELLED'}
+            self.report_json = json.dumps(report, ensure_ascii=False)
+        report = json.loads(self.report_json)
+        if not report['changed'] and self.report_tab == 'CHANGED':
+            self.report_tab = 'SCENE' if any(action['status'] != 'PRESERVED'
+                                           for action in report['scene_actions']) else 'UNCHANGED'
+        return context.window_manager.invoke_popup(self, width=960)
+
+    def draw(self, context):
+        report = json.loads(self.report_json)
+        layout = self.layout
+        header = layout.box()
+        row = header.row()
+        row.scale_y = 1.6
+        row.label(text='工作区 Setup · 执行结果', icon='CHECKMARK')
+        header.label(text=f"场景识别：{report['mode']}")
+        row = header.row()
+        row.label(text=f"修改 {len(report['changed'])} 项设置", icon='FILE_REFRESH')
+        row.label(text=f"原本一致 {len(report['unchanged'])} 项", icon='CHECKMARK')
+        added = sum(action['status'] != 'PRESERVED' for action in report['scene_actions'])
+        row.label(text=f'场景操作 {added} 项', icon='ADD')
+        layout.prop(self, 'report_tab', expand=True)
+        box = layout.box()
+        if self.report_tab == 'SCENE':
+            for action in report['scene_actions']:
+                row = box.row()
+                split = row.split(factor=0.17)
+                split.label(text=action['label'], icon='CHECKMARK'
+                            if action['status'] == 'PRESERVED' else 'ADD')
+                split.label(text=action['detail'])
+        else:
+            entries = report['changed' if self.report_tab == 'CHANGED' else 'unchanged']
+            if not entries:
+                box.label(text='没有需要修改的设置', icon='CHECKMARK')
+            group = None
+            group_order = ('Eevee', 'Cycles', '通用', '色彩', '输出', '外部数据')
+            for entry in sorted(entries, key=lambda entry: group_order.index(entry['group'])):
+                if group != entry['group']:
+                    group = entry['group']
+                    box.separator(factor=0.5)
+                    box.label(text=group)
+                row = box.row()
+                split = row.split(factor=0.4)
+                split.label(text=entry['label'])
+                if self.report_tab == 'CHANGED':
+                    values = split.row()
+                    values.label(text=entry['old'])
+                    values.label(text='→')
+                    values.label(text=entry['new'])
+                else:
+                    split.label(text=entry['new'], icon='CHECKMARK')
+        layout.label(text='这是本次运行时的记录。关闭后可用 setup 旁的 ⓘ 按钮重新查看。', icon='INFO')
+
+    def execute(self, context):
+        return {'FINISHED'}
 
 
 class BekkanPanelBase:
@@ -43,7 +120,9 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
 
     def draw(self, context):
         col = self.layout.column(align=True)
-        col.operator('view3d.setup_workspace_visn', icon='SETTINGS')
+        row = col.row(align=True)
+        row.operator('view3d.setup_workspace_visn', icon='SETTINGS')
+        row.operator('wm.workspace_setup_report_visn', text='', icon='INFO')
         col.separator()
         col.operator("object.fast_camera_visn", icon='CAMERA_DATA')
         col.operator("object.cspzt_camera_visn", icon='VIEW_CAMERA')
@@ -60,7 +139,6 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         elif (context.scene.transform_orientation_slots[0].type == 'VIEW'
               and context.scene.tool_settings.transform_pivot_point == 'CURSOR'):
             col.label(text='当前是 View / 3D Cursor，但没有恢复记录', icon='ERROR')
-        col.operator("object.add_light_with_constraint", icon='LIGHT_SPOT')
         col.operator("object.delete_empty_null_visn", icon='X')
         col.operator("camera.create_focus_object", icon='VIEW_CAMERA')
         col.operator("object.checkerboard_layout_visn", icon='MESH_GRID')
@@ -271,6 +349,7 @@ class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
 
 
 _classes = (
+    BEKKAN_OT_workspace_setup_report,
     VIEW3D_PT_parents_visn,
     VIEW3D_PT_stage_visn,
     VIEW3D_PT_rig_animation_visn,
