@@ -5,6 +5,8 @@ import bpy
 import json
 
 from .prefs import module_enabled
+from ...core import breath
+from ...core import skirt_autosway
 
 
 class BEKKAN_OT_workspace_setup_report(bpy.types.Operator):
@@ -187,17 +189,59 @@ class VIEW3D_PT_rig_animation_visn(BekkanPanelBase, bpy.types.Panel):
 
 class VIEW3D_PT_anime_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_anime_visn"
-    bl_label = "🎞 动画类"
+    bl_label = "动画工具"
+    bl_parent_id = "VIEW3D_PT_rig_animation_visn"
+    bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
     def poll(cls, context):
-        return module_enabled("show_anime")
+        return module_enabled("show_rig_animation")
 
     def draw(self, context):
         col = self.layout.column(align=True)
         col.operator("object.add_noise_anim", text="Wiggle（添加/更新Noise）", icon='MOD_NOISE')
         col.operator("object.remove_all_animations_visn", icon='CANCEL')
         col.operator('object.sync_armature_psr_visn')
+
+
+class VIEW3D_PT_breath_visn(BekkanPanelBase, bpy.types.Panel):
+    bl_idname = "VIEW3D_PT_breath_visn"
+    bl_label = "呼吸 · 体态与NLA层"
+    bl_parent_id = "VIEW3D_PT_rig_animation_visn"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        lay = self.layout
+        rig = breath.rig_from_context(context)
+        lay.operator('visn_breath.setup', text='匹配骨骼 / 创建或更新呼吸', icon='ARMATURE_DATA')
+        ctrl = breath.controller_for(rig)
+        if ctrl is None:
+            lay.label(text='选骨架或姿态骨，然后点击上方按钮')
+            return
+        lay.prop(ctrl, '["enabled"]', text='启用呼吸')
+        for key, label in [('strength', '总幅度'), ('width_percent', '宽度扩张（%）'),
+                           ('depth_percent', '厚度扩张（%）'), ('length_percent', '长度扩张（%）'),
+                           ('abdomen_ratio', '腹部比例')]:
+            lay.prop(ctrl, '["' + key + '"]', text=label)
+        for key, label in [('chest_lift_mm', '胸部抬升（毫米）'),
+                           ('head_lift_mm', '头部额外抬升（毫米）'),
+                           ('shoulder_lift_mm', '双肩额外抬升（毫米）')]:
+            lay.prop(ctrl, '["' + key + '"]', text=label)
+        if rig.animation_data:
+            track = rig.animation_data.nla_tracks.get(breath.TRACK)
+            if track and track.strips:
+                lay.prop(track, 'mute', text='静音呼吸NLA')
+                lay.prop(track.strips[0], 'influence', text='NLA影响')
+        lay.separator()
+        for key, label in [('period_seconds', '周期（秒）'), ('phase', '相位（周期）'),
+                           ('inhale_ratio', '吸气比例')]:
+            lay.prop(ctrl, '["' + key + '"]', text=label)
+        lay.operator('visn_breath.refresh', icon='FILE_REFRESH')
+        lay.label(text='胸腔：' + ctrl.get('chest', ''))
+        if ctrl.get('abdomen'):
+            lay.label(text='腹部：' + ctrl['abdomen'])
+        lay.operator('visn_breath.view_layer', icon='NLA')
+        lay.operator('visn_breath.remove', icon='TRASH')
 
 
 class VIEW3D_PT_anime_autosway_visn(BekkanPanelBase, bpy.types.Panel):
@@ -230,7 +274,7 @@ class VIEW3D_PT_anime_autosway_visn(BekkanPanelBase, bpy.types.Panel):
 
         col = layout.column(align=True)
         col.operator("autosway.add_sway", icon='DRIVER')
-        col.operator("autosway.clear_sway", icon='TRASH')
+        col.operator("autosway.clear_sway", text='清除选中及子级摆动', icon='TRASH')
 
         self._draw_control_groups(layout, scene, props)
 
@@ -306,6 +350,40 @@ class VIEW3D_PT_anime_autosway_visn(BekkanPanelBase, bpy.types.Panel):
             row.prop(scene, f'["{prop_path}"]', text=label, slider=False)
 
 
+class VIEW3D_PT_skirt_autosway_visn(BekkanPanelBase, bpy.types.Panel):
+    bl_idname = 'VIEW3D_PT_skirt_autosway_visn'
+    bl_label = '裙摆 AutoSway'
+    bl_parent_id = 'VIEW3D_PT_anime_visn'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        if context.mode != 'POSE' or context.active_pose_bone is None:
+            layout.label(text='姿态模式下选中裙摆总骨骼', icon='INFO')
+            return
+        root = context.active_pose_bone
+        group = skirt_autosway._group_for(root, context.scene)
+        props = context.scene.autosway_settings
+        layout.label(text=f'{root.name} · 直属裙摆链 {len(root.children)} 条')
+        if group is None:
+            layout.prop(props, 'my_enum')
+        for key in ('my_swayAngle', 'my_incrementalAngle',
+                    'my_loopFrame', 'my_staggeredFrames', 'my_offsetFrame',
+                    'skirt_loop_wave'):
+            layout.prop(props, key)
+        row = layout.row(align=True)
+        add = row.row(align=True)
+        add.enabled = group is None
+        add.operator('autosway.add_skirt', text='一键添加', icon='ADD')
+        adjust = row.row(align=True)
+        adjust.enabled = group is not None
+        adjust.operator('autosway.adjust_skirt', text='一键调整', icon='FILE_REFRESH')
+        remove = row.row(align=True)
+        remove.enabled = group is not None
+        remove.operator('autosway.remove_skirt', text='一键删除', icon='TRASH')
+        layout.label(text='裙片相位自动绕一周；错帧量作用于链内', icon='INFO')
+
+
 class VIEW3D_PT_render_preset_visn(BekkanPanelBase, bpy.types.Panel):
     bl_idname = "VIEW3D_PT_render_preset_visn"
     bl_label = "🎬 渲染预设"
@@ -356,6 +434,8 @@ _classes = (
     VIEW3D_PT_texture_visn,
     VIEW3D_PT_anime_visn,
     VIEW3D_PT_anime_autosway_visn,
+    VIEW3D_PT_skirt_autosway_visn,
+    VIEW3D_PT_breath_visn,
     VIEW3D_PT_render_preset_visn,
     BEKKAN_PT_plugin_debug,
 )

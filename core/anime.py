@@ -3,6 +3,7 @@
 # 面板在 ui/bekkan/panels.py
 import random  # type: ignore
 import copy
+import re
 import bpy  # type: ignore
 from mathutils import Matrix
 from bpy.props import FloatProperty, EnumProperty, PointerProperty, StringProperty  # type: ignore
@@ -145,6 +146,38 @@ class RemoveAllAnimations(bpy.types.Operator):
 _autosway_group_counter = 0
 
 
+def _autosway_driver_group(fc, scene=None):
+    """根据驱动变量识别 AutoSway 控制组，不碰其他动画驱动。"""
+    for var in fc.driver.variables:
+        for target in var.targets:
+            if scene is not None and target.id != scene:
+                continue
+            path = target.data_path
+            match = re.fullmatch(r'\["(autosway_(?:Control_Group_\d+|skirt_[0-9a-f]+))_angle"\]', path)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _autosway_remove_unused_group(scene, group):
+    for ob in bpy.data.objects:
+        if ob.animation_data and any(_autosway_driver_group(fc, scene) == group
+                                     for fc in ob.animation_data.drivers):
+            return
+    for param in ('angle', 'incremental', 'loop', 'stagger', 'offset',
+                  'loop_wave', 'display_name'):
+        key = f'{group}_{param}'
+        if key in scene:
+            del scene[key]
+    if scene.autosway_settings.active_control_group == group:
+        scene.autosway_settings.active_control_group = ''
+    if group.startswith('autosway_skirt_'):
+        for armature in bpy.data.armatures:
+            for bone in armature.bones:
+                if bone.get('_visn_skirt_autosway') == group:
+                    del bone['_visn_skirt_autosway']
+
+
 class AutoSwaySettings(bpy.types.PropertyGroup):
     my_swayAngle: FloatProperty(
         name="摆动角度", description="骨骼基础摆动角度（度）",
@@ -161,6 +194,9 @@ class AutoSwaySettings(bpy.types.PropertyGroup):
     my_offsetFrame: FloatProperty(
         name="帧偏移", description="整体动画起始偏移帧",
         default=0, soft_min=-240, soft_max=240)  # type: ignore
+    skirt_loop_wave: FloatProperty(
+        name="循环波动帧", description="各裙摆链的循环帧数沿圆周按余弦变化；0 表示全部相同",
+        default=5, min=0, soft_max=60)  # type: ignore
     my_enum: EnumProperty(
         name="摆动轴向", description="驱动器控制的旋转轴向",
         items=[('OP1', "X", "绕 X 轴摆动"),
@@ -236,7 +272,7 @@ class AUTOSWAY_OT_AddSway(bpy.types.Operator):
 class AUTOSWAY_OT_ClearSway(bpy.types.Operator):
     bl_idname = "autosway.clear_sway"
     bl_label = "清除动画"
-    bl_description = "移除选中骨骼的摆动驱动器并归零旋转"
+    bl_description = "移除选中骨骼及全部子级的 AutoSway 驱动，并将受驱动的旋转轴复位"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -245,11 +281,38 @@ class AUTOSWAY_OT_ClearSway(bpy.types.Operator):
             self.report({'ERROR'}, "未选择骨骼！")
             return {'CANCELLED'}
 
+        bones = set()
+        def collect(bone):
+            if bone.name in bones:
+                return
+            bones.add(bone.name)
+            for child in bone.children:
+                collect(child)
         for bone in selected_bones:
-            for i in range(3):
-                bone.driver_remove('rotation_euler', i)
-            bone.rotation_euler = (0, 0, 0)
-
+            collect(bone)
+        rig = context.active_object
+        removed = 0
+        groups = set()
+        if rig.animation_data:
+            for fc in list(rig.animation_data.drivers):
+                if not fc.data_path.endswith('.rotation_euler'):
+                    continue
+                bone = next((rig.pose.bones[name] for name in bones
+                             if fc.data_path == rig.pose.bones[name].path_from_id('rotation_euler')), None)
+                group = _autosway_driver_group(fc, context.scene)
+                if bone is not None and group:
+                    axis = fc.array_index
+                    bone.driver_remove('rotation_euler', axis)
+                    bone.rotation_euler[axis] = 0.0
+                    removed += 1
+                    groups.add(group)
+        for group in groups:
+            _autosway_remove_unused_group(context.scene, group)
+        rig.update_tag(refresh={'OBJECT'})
+        context.scene.update_tag()
+        context.scene.frame_set(context.scene.frame_current, subframe=context.scene.frame_subframe)
+        context.view_layer.update()
+        self.report({'INFO'}, f'已清除 {removed} 条 AutoSway 驱动（含子级）')
         return {'FINISHED'}
 
 
@@ -268,13 +331,30 @@ class AUTOSWAY_OT_RemoveControlGroup(bpy.types.Operator):
             return {'CANCELLED'}
 
         prop_group_name = props.active_control_group
+        removed = 0
+        for ob in bpy.data.objects:
+            if not ob.animation_data:
+                continue
+            for fc in list(ob.animation_data.drivers):
+                if _autosway_driver_group(fc, scene) == prop_group_name:
+                    axis = fc.array_index
+                    bone = next((pb for pb in ob.pose.bones
+                                 if fc.data_path == pb.path_from_id('rotation_euler')), None) if ob.type == 'ARMATURE' else None
+                    ob.driver_remove(fc.data_path, fc.array_index)
+                    if bone is not None:
+                        bone.rotation_euler[axis] = 0.0
+                    removed += 1
+            ob.update_tag(refresh={'OBJECT'})
         for param in ('angle', 'incremental', 'loop', 'stagger', 'offset', 'display_name'):
             prop_path = f"{prop_group_name}_{param}"
             if prop_path in scene:
                 del scene[prop_path]
 
         props.active_control_group = ""
-        self.report({'INFO'}, "已删除控制组")
+        scene.update_tag()
+        scene.frame_set(scene.frame_current, subframe=scene.frame_subframe)
+        context.view_layer.update()
+        self.report({'INFO'}, f'已删除控制组及其 {removed} 条驱动')
         return {'FINISHED'}
 
 
