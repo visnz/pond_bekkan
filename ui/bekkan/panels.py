@@ -149,6 +149,39 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         row.operator("object.anchor_to_top_visn", text="锚点到顶部中心", icon='ANCHOR_TOP')
         row.operator("object.anchor_to_bottom_visn", text="锚点到底部中心", icon='ANCHOR_BOTTOM')
         col.operator("object.clear_all_fake_users_visn", icon='X')
+        col.separator()
+        props = context.scene.visibility_audit
+        col.operator('view3d.check_visibility_visn', icon='VIEWZOOM')
+        col.prop(props, 'exclusions', text='排除')
+        if props.has_scan:
+            box = self.layout.box()
+            box.label(text=f'上次检查：{len(props.results)} 个不一致',
+                      icon='ERROR' if props.results else 'CHECKMARK')
+            box.label(text=f'视图层：{props.scanned_layer}')
+            if props.exclusions != props.scanned_exclusions or context.view_layer.name != props.scanned_layer:
+                box.label(text='排除项或视图层已更改，请重新检查', icon='INFO')
+            if props.results:
+                row = box.row()
+                row.label(text='点击名称定位；右侧为检查时状态')
+                box.template_list('BEKKAN_UL_visibility_audit', '', props, 'results',
+                                  props, 'index', rows=min(6, len(props.results)))
+            box.label(text=f'已排除：吸光体 {props.ignored_absorbers} / 关键词 {props.ignored_keywords}')
+            box.label(text='调整可见性后，请再次点击检查')
+
+
+class BEKKAN_UL_visibility_audit(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_property, index, flt_flag=0):
+        obj = item.object
+        if obj is None:
+            layout.label(text='对象已删除，请重新检查', icon='INFO')
+            return
+        row = layout.row(align=True)
+        split = row.split(factor=0.62, align=True)
+        op = split.operator('view3d.activate_visibility_result_visn', text=obj.name, emboss=False)
+        op.object_name = obj.name
+        states = split.row(align=True)
+        states.label(text='视', icon='HIDE_OFF' if item.viewport_visible else 'HIDE_ON')
+        states.label(text='渲', icon='RESTRICT_RENDER_OFF' if item.render_visible else 'RESTRICT_RENDER_ON')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
@@ -428,6 +461,7 @@ class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
 
 _classes = (
     BEKKAN_OT_workspace_setup_report,
+    BEKKAN_UL_visibility_audit,
     VIEW3D_PT_parents_visn,
     VIEW3D_PT_stage_visn,
     VIEW3D_PT_rig_animation_visn,

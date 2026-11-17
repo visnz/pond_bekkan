@@ -95,18 +95,21 @@ def test_repeat_and_exact_report(scene):
     sun.data.energy = 3.75
     camera.data.dof.aperture_fstop = 9
     report = setup.setup_workspace(bpy.context)
-    assert not report['changed'] and len(report['unchanged']) == 28
+    assert not report['changed'] and len(report['unchanged']) == 29
     assert all(a['status'] == 'PRESERVED' for a in report['scene_actions'])
     assert (set(scene.objects), scene.camera, scene.world) == (objects, camera, world)
     assert sun.data.energy == 3.75 and camera.data.dof.aperture_fstop == 9
     scene.render.fps = 24
+    scene.lock_frame_selection_to_range = False
     scene.eevee.use_shadow_jitter_viewport = False
     scene.cycles.preview_adaptive_threshold = 0.03
     scene.cycles.denoising_quality = 'FAST'
     scene.render.filepath = '//output\\output.png'
     report = setup.setup_workspace(bpy.context)
     labels = {e['label'] for e in report['changed']}
-    assert labels == {'帧率', '视口抖动阴影', '视口 Noise Threshold', '视口去噪质量'}, labels
+    assert labels == {'帧率', '视口抖动阴影', '视口 Noise Threshold', '视口去噪质量', '限制到帧范围'}, labels
+    limit_entry = next(e for e in report['changed'] if e['label'] == '限制到帧范围')
+    assert (limit_entry['group'], limit_entry['old'], limit_entry['new']) == ('通用', '关闭', '开启')
     entry = next(e for e in report['changed'] if e['label'] == '视口 Noise Threshold')
     assert (entry['old'], entry['new']) == ('0.03', '0.02')
     assert any(e['label'] == '输出路径' for e in report['unchanged'])
@@ -198,6 +201,7 @@ def test_rollback():
     scene = new_scene('Rollback existing')
     model = mesh_object(scene)
     scene.render.fps = 12
+    scene.lock_frame_selection_to_range = False
     objects = set(scene.objects)
     count = tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
                                    bpy.data.lights, bpy.data.collections))
@@ -215,6 +219,7 @@ def test_rollback():
         setup.create_sky_world = original
     assert set(scene.objects) == objects and model in list(scene.objects)
     assert scene.render.fps == 12 and scene.camera is None and scene.world is None
+    assert not scene.lock_frame_selection_to_range
     assert tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
                                   bpy.data.lights, bpy.data.collections)) == count
 

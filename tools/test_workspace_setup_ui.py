@@ -40,6 +40,7 @@ scene.cycles.denoising_quality = 'HIGH'
 scene.cycles.denoising_use_gpu = True
 scene.render.fps = 24
 scene.render.fps_base = 1.001
+scene.lock_frame_selection_to_range = False
 
 
 def scene_state():
@@ -49,7 +50,8 @@ def scene_state():
             scene.render.filepath, scene.view_settings.view_transform,
             bpy.data.colorspace.working_space,
             scene.camera.name if scene.camera else None,
-            scene.world.name if scene.world else None)
+            scene.world.name if scene.world else None,
+            scene.lock_frame_selection_to_range)
 
 
 def finish(ok, error=None):
