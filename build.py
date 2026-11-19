@@ -128,6 +128,9 @@ def _generate_analyzer_panel():
 
 
 def _patched_content(path, variant_name, build_mode):
+    # 节点资源 .blend 等二进制原样打包，只有 Python 文件需要文本补丁。
+    if path.suffix != ".py":
+        return path.read_bytes()
     text = path.read_text(encoding="utf-8")
     if path.name == "_build_mode.py":
         return (f'# 构建标记：本包由 build.py 生成\n'

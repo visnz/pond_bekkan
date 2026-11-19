@@ -9,6 +9,100 @@ from ...core import breath
 from ...core import skirt_autosway
 
 
+def _size_report_tab_changed(self, context):
+    self.report_page = 1
+
+
+class BEKKAN_OT_file_size_report(bpy.types.Operator):
+    bl_idname = 'wm.file_size_report_visn'
+    bl_label = '文件体积检查报告'
+    bl_description = '查看上次文件体积检查的占比和数据排名'
+    bl_options = {'INTERNAL'}
+
+    report_json: bpy.props.StringProperty(options={'HIDDEN', 'SKIP_SAVE'})
+    report_tab: bpy.props.EnumProperty(name='内容', items=(
+        ('SUMMARY', '占比概览', ''), ('IMAGE', '贴图', ''),
+        ('GEOMETRY', '几何', ''), ('OTHER', '其他数据', ''),
+        ('EXTERNAL', '外部图片', ''),
+    ), default='SUMMARY', options={'SKIP_SAVE'}, update=_size_report_tab_changed)
+    report_page: bpy.props.IntProperty(name='页码', default=1, min=1, options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        from ...core.file_size_audit import last_report
+        report = last_report()
+        if report is None or report['filepath'] != bpy.data.filepath:
+            self.report({'INFO'}, '请先检查当前文件的体积')
+            return {'CANCELLED'}
+        self.report_json = json.dumps(report, ensure_ascii=False)
+        return context.window_manager.invoke_popup(self, width=1050)
+
+    def draw(self, context):
+        import textwrap
+        from ...core.file_size_audit import format_bytes
+        report = json.loads(self.report_json)
+        layout = self.layout
+        header = layout.box()
+        row = header.row()
+        row.scale_y = 1.5
+        row.label(text=f'文件体积：{format_bytes(report["disk_bytes"])}', icon='FILE_BLEND')
+        row.label(text='已压缩保存' if report['compressed'] else '未压缩保存')
+        header.label(text=report['filepath'])
+        if report['compressed']:
+            header.label(text=f'压缩前 {format_bytes(report["raw_bytes"])}；以下占比按压缩前的实际数据计算')
+        else:
+            header.label(text='以下占比按最后保存的文件计算')
+        if report['dirty'] or bpy.data.is_dirty:
+            row = header.row()
+            row.alert = True
+            row.label(text='当前有未保存改动：体积来自最后保存版本，引用与拓扑信息来自当前工程', icon='INFO')
+        layout.prop(self, 'report_tab', expand=True)
+        if self.report_tab == 'SUMMARY':
+            box = layout.box()
+            for category in report['categories']:
+                row = box.row()
+                split = row.split(factor=0.78)
+                split.progress(factor=category['percent'] / 100, type='BAR',
+                               text=f'{category["label"]}  {category["percent"]:.1f}%')
+                split.label(text=format_bytes(category['bytes']))
+            layout.label(text='提交前可检查：大贴图分辨率 / 重复图片 / 无实际引用的数据 / 不需要的 UV、属性及形态键')
+            layout.label(text='几何按已保存数据计算，共用网格只计一份；包含 UV、属性和形态键。')
+            layout.label(text='外部图片不计入 .blend 体积；需要随工程提交时，可在“外部图片”页查看。')
+        else:
+            if self.report_tab == 'EXTERNAL':
+                entries = report['externals']
+                layout.label(text=f'唯一外部图片路径 {len(entries)} 个；可统计的文件合计 {format_bytes(report["external_bytes"])}')
+            elif self.report_tab == 'OTHER':
+                entries = [e for e in report['entries'] if e['category'] not in {'IMAGE', 'GEOMETRY'}]
+            else:
+                entries = [e for e in report['entries'] if e['category'] == self.report_tab]
+            pages = max(1, (len(entries) + 7) // 8)
+            page = min(self.report_page, pages)
+            row = layout.row()
+            row.label(text=f'按体积从大到小：{len(entries)} 项 / 共 {pages} 页')
+            row.prop(self, 'report_page', text=f'页码（最多 {pages}）')
+            for entry in entries[(page - 1) * 8:page * 8]:
+                box = layout.box()
+                row = box.row()
+                split = row.split(factor=0.67)
+                if entry['code'] == 'ME':
+                    split.operator('wm.select_size_mesh_visn', text=entry['name'], icon='MESH_DATA',
+                                   emboss=False).mesh_name = entry['name']
+                else:
+                    split.label(text=entry['name'], icon='IMAGE_DATA' if entry['code'] == 'IM' else 'FILE')
+                values = split.row()
+                values.label(text=format_bytes(entry['bytes']))
+                if self.report_tab != 'EXTERNAL':
+                    values.label(text=f'{entry["percent"]:.2f}%')
+                for line in textwrap.wrap(entry['detail'], width=90):
+                    box.label(text=line)
+            if not entries:
+                layout.label(text='没有这一类数据', icon='CHECKMARK')
+        layout.label(text='这是手动检查快照。修改并保存后再次检查；报告不会自动清理或修改工程。', icon='INFO')
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
 class BEKKAN_OT_workspace_setup_report(bpy.types.Operator):
     bl_idname = 'wm.workspace_setup_report_visn'
     bl_label = 'Setup 执行报告'
@@ -149,6 +243,46 @@ class VIEW3D_PT_stage_visn(BekkanPanelBase, bpy.types.Panel):
         row.operator("object.anchor_to_top_visn", text="锚点到顶部中心", icon='ANCHOR_TOP')
         row.operator("object.anchor_to_bottom_visn", text="锚点到底部中心", icon='ANCHOR_BOTTOM')
         col.operator("object.clear_all_fake_users_visn", icon='X')
+        col.separator()
+        row = col.row(align=True)
+        row.operator('wm.audit_file_size_visn', icon='FILE_BLEND')
+        from ...core.file_size_audit import last_report
+        report = last_report()
+        info = row.row(align=True)
+        info.enabled = report is not None and report['filepath'] == bpy.data.filepath
+        info.operator('wm.file_size_report_visn', text='', icon='INFO')
+        props = context.scene.visibility_audit
+        col.operator('view3d.check_visibility_visn', icon='VIEWZOOM')
+        col.prop(props, 'exclusions', text='排除')
+        if props.has_scan:
+            box = self.layout.box()
+            box.label(text=f'上次检查：{len(props.results)} 个不一致',
+                      icon='ERROR' if props.results else 'CHECKMARK')
+            box.label(text=f'视图层：{props.scanned_layer}')
+            if props.exclusions != props.scanned_exclusions or context.view_layer.name != props.scanned_layer:
+                box.label(text='排除项或视图层已更改，请重新检查', icon='INFO')
+            if props.results:
+                row = box.row()
+                row.label(text='点击名称定位；右侧为检查时状态')
+                box.template_list('BEKKAN_UL_visibility_audit', '', props, 'results',
+                                  props, 'index', rows=min(6, len(props.results)))
+            box.label(text=f'已排除：吸光体 {props.ignored_absorbers} / 关键词 {props.ignored_keywords}')
+            box.label(text='调整可见性后，请再次点击检查')
+
+
+class BEKKAN_UL_visibility_audit(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_property, index, flt_flag=0):
+        obj = item.object
+        if obj is None:
+            layout.label(text='对象已删除，请重新检查', icon='INFO')
+            return
+        row = layout.row(align=True)
+        split = row.split(factor=0.62, align=True)
+        op = split.operator('view3d.activate_visibility_result_visn', text=obj.name, emboss=False)
+        op.object_name = obj.name
+        states = split.row(align=True)
+        states.label(text='视', icon='HIDE_OFF' if item.viewport_visible else 'HIDE_ON')
+        states.label(text='渲', icon='RESTRICT_RENDER_OFF' if item.render_visible else 'RESTRICT_RENDER_ON')
 
 
 class VIEW3D_PT_texture_visn(BekkanPanelBase, bpy.types.Panel):
@@ -427,7 +561,9 @@ class BEKKAN_PT_plugin_debug(BekkanPanelBase, bpy.types.Panel):
 
 
 _classes = (
+    BEKKAN_OT_file_size_report,
     BEKKAN_OT_workspace_setup_report,
+    BEKKAN_UL_visibility_audit,
     VIEW3D_PT_parents_visn,
     VIEW3D_PT_stage_visn,
     VIEW3D_PT_rig_animation_visn,

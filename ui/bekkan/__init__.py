@@ -7,7 +7,7 @@ import bpy
 
 from . import (snapshot_panel, analyzer_panel, light_compose_panel,
                lightdesk_panel, unselectable_panel, panels, outline_panel, addonmanager_panel,
-               shader_panel)
+               shader_panel, geometry_panel)
 from ...core import addonmanager as _am_core
 
 
@@ -20,6 +20,7 @@ def register():
     panels.register()
     outline_panel.register()
     shader_panel.register()
+    geometry_panel.register()
     _am_core.register()
     addonmanager_panel.register()
 
@@ -28,6 +29,7 @@ def unregister():
     # 先恢复被管理器移动过的面板，再注销本模式 UI
     addonmanager_panel.unregister()
     _am_core.unregister()
+    geometry_panel.unregister()
     shader_panel.unregister()
     outline_panel.unregister()
     panels.unregister()

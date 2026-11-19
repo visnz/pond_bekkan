@@ -17,9 +17,11 @@ class BEKKAN_PT_shader_scripts(bpy.types.Panel):
         return current_material_tree(context) is not None
 
     def draw(self, context):
-        layout = self.layout
+        layout = self.layout.column(align=True)
+        layout.operator('material.import_fab_visn', icon='IMPORT')
         layout.operator('node.arrange_material_visn', icon='NODETREE')
         layout.operator('node.selected_images_non_color_visn', icon='IMAGE_DATA')
+        layout.operator('analyzer.fix_normal_colorspace_visn', icon='NODE_MATERIAL')
         layout.operator('node.select_unrelated_shader_nodes_visn', icon='RESTRICT_SELECT_OFF')
         layout.separator()
         status = status_for(context)

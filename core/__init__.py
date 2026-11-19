@@ -5,13 +5,16 @@ from . import (snapshot, hierarchy, stage, anime, breath, skirt_autosway, render
                organize, lumen, synccheck, c4d_bridge, preset_lib, version,
                palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
                renderlayers, analyzer, outline, debug, light_probe, unselectable, shader_tools,
-               workspace_setup, fotosketcher)
+               workspace_setup, autoblend, fab_material, visibility_audit,
+               file_size_audit, geometry_tools, fotosketcher)
 
 _MODULES = (
     snapshot, hierarchy, stage, anime, breath, skirt_autosway, render_preset, texture,
     organize, lumen, synccheck, c4d_bridge, preset_lib, version,
     palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
-    renderlayers, analyzer, outline, debug, light_probe, unselectable, shader_tools, workspace_setup, fotosketcher,
+    renderlayers, analyzer, outline, debug, light_probe, unselectable, shader_tools,
+    workspace_setup, autoblend, fab_material, visibility_audit, file_size_audit,
+    geometry_tools, fotosketcher,
 )
 
 
