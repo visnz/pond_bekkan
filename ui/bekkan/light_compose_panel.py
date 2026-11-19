@@ -1,8 +1,7 @@
 # 别馆模式 ·「✨ 灯光合成」独立面板
 # 新操作脚本容器：「贴图强制压缩」（三步向导，见
-# core/analyzer/ops.py 的 ANALYZER_OT_downscale）、「修复法线贴图色彩空间」
-# （见 ANALYZER_OT_fix_normal_colorspace，同一套算法也用在工程分析的
-# MAT.normal_map_colorspace 检查项，这里单独放一个按钮不用先跑分析）；
+# core/analyzer/ops.py 的 ANALYZER_OT_downscale）；
+# Fab 节点导入、修复法线贴图色彩空间入口位于 shader_panel.py。
 # 双引擎 Cy 白膜适配：core/texture.py，共用一个白膜节点组。
 # 中心约束灯光：core/stage.py；隐形遮光板、探针、EV 吸光体及烘焙：core/light_probe.py。
 # 后续脚本以按钮追加。
@@ -30,22 +29,6 @@ class BEKKAN_PT_light_compose(bpy.types.Panel):
         col.operator('material.base_color_direct_visn', icon='NODE_MATERIAL')
         col.operator("analyzer.downscale_textures_visn",
                         text="贴图强制压缩", icon="IMAGE")
-        col.operator("analyzer.fix_normal_colorspace_visn",
-                        text="修复法线贴图色彩空间", icon="NODE_MATERIAL")
-
-
-class BEKKAN_PT_fab_material(bpy.types.Panel):
-    bl_label = "Fab / Megascans · 材质导入"
-    bl_idname = "BEKKAN_PT_fab_material"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "别馆"
-    bl_parent_id = "BEKKAN_PT_light_compose"
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw(self, context):
-        col = self.layout.column(align=True)
-        col.operator("material.import_fab_visn", icon="IMPORT")
 
 
 class BEKKAN_PT_autoblend(bpy.types.Panel):
@@ -129,7 +112,7 @@ class BEKKAN_PT_autoblend(bpy.types.Panel):
             row.prop(input_socket, "default_value", text=label)
 
 
-_classes = (BEKKAN_PT_light_compose, BEKKAN_PT_fab_material, BEKKAN_PT_autoblend)
+_classes = (BEKKAN_PT_light_compose, BEKKAN_PT_autoblend)
 
 
 def register():

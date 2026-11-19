@@ -15,8 +15,21 @@ SAMPLE = Path(r'C:\ProgramData\Epic\EpicGamesLauncher\VaultCache\FabLibrary\Worn
 scene = bpy.context.scene
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
-assert bpy.ops.material.import_fab_visn(directory=str(SAMPLE)) == {'FINISHED'}
+# 预览模型只是测试夹具；导入器本身只添加材质节点。
+bpy.ops.mesh.primitive_monkey_add(calc_uvs=True)
 monkey = bpy.context.object
+subdivision = monkey.modifiers.new('Test preview', 'SUBSURF')
+subdivision.levels = subdivision.render_levels = 2
+for polygon in monkey.data.polygons:
+    polygon.use_smooth = True
+material = bpy.data.materials.new('Render test')
+if material.node_tree is None:
+    material.use_nodes = True
+material.node_tree.nodes.clear()
+monkey.data.materials.append(material)
+fab = importlib.import_module(ROOT.name + '.core.fab_material')
+_folder, name, _resolution, maps = fab.discover_textures(SAMPLE)
+fab.import_material_nodes(material, material.node_tree, name, maps)
 tree = monkey.active_material.node_tree
 scale = next(n for n in tree.nodes if n.type == 'VALUE')
 scene.render.engine = 'CYCLES'
