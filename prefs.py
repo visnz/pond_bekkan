@@ -98,6 +98,12 @@ class ADDONMANAGER_CategoryExcludeItem(PropertyGroup):
 class PondBekkanPreferences(AddonPreferences):
     bl_idname = __package__
 
+    fotosketcher_folder: StringProperty(
+        name='FotoSketcher 文件夹',
+        description='包含 FotoSketcher.exe 的文件夹；留空或路径失效时下次运行会重新选择',
+        subtype='DIR_PATH', default=''
+    )
+
     # ── 界面模式（仅合体版在 draw 中显示；独立版该字段闲置） ──
     mode: EnumProperty(
         name="界面模式",
