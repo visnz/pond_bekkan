@@ -213,18 +213,31 @@ with bpy.context.temp_override(area=area, region=next(r for r in area.regions if
     assert texture.image.colorspace_settings.name == 'Non-Color'
 
     class LayoutRecorder:
-        def __init__(self): self.ops = []
+        def __init__(self): self.ops, self.labels = [], []
         def column(self, **kwargs): return self
-        def operator(self, name, **kwargs): self.ops.append(name)
+        def row(self, **kwargs): return self
+        def separator(self): pass
+        def label(self, **kwargs): pass
+        def operator(self, name, **kwargs):
+            self.ops.append(name)
+            self.labels.append(kwargs.get('text'))
+            return SimpleNamespace()
     layout = LayoutRecorder()
     shader_panel.BEKKAN_PT_shader_scripts.draw(SimpleNamespace(layout=layout), bpy.context)
     assert 'material.import_fab_visn' in layout.ops and 'analyzer.fix_normal_colorspace_visn' in layout.ops
+    assert layout.labels[:5] == ['导入Fab材质', '整理', '图片转Non-Color', '修复全局法线Non-Color', '选中无关输出节点']
     layout = LayoutRecorder()
     light_panel.BEKKAN_PT_light_compose.draw(SimpleNamespace(layout=layout), bpy.context)
     assert 'material.import_fab_visn' not in layout.ops and 'analyzer.fix_normal_colorspace_visn' not in layout.ops
+    assert 'material.cycles_clay_visn' not in layout.ops and 'material.cancel_cycles_clay_visn' not in layout.ops
     space.shader_type = 'WORLD'
+    space.path.clear()
+    space.path.start(bpy.context.scene.world.node_tree)
     assert not bpy.ops.material.import_fab_visn.poll()
-    assert not shader_panel.BEKKAN_PT_shader_scripts.poll(bpy.context)
+    assert shader_panel.BEKKAN_PT_shader_scripts.poll(bpy.context)
+    layout = LayoutRecorder()
+    shader_panel.BEKKAN_PT_shader_scripts.draw(SimpleNamespace(layout=layout), bpy.context)
+    assert layout.ops == ['material.cycles_clay_visn', 'material.cancel_cycles_clay_visn']
     space.shader_type = 'OBJECT'
 
 ui.apply_mode('BEKKAN')

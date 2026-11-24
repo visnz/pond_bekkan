@@ -37,7 +37,11 @@ scene.render.engine = 'BLENDER_EEVEE'
 scene.cycles.denoising_input_passes = 'RGB_ALBEDO_NORMAL'
 scene.cycles.denoising_prefilter = 'ACCURATE'
 scene.cycles.denoising_quality = 'HIGH'
-scene.cycles.denoising_use_gpu = True
+scene.cycles.denoiser = 'OPENIMAGEDENOISE'
+scene.cycles.denoising_use_gpu = False
+scene.cycles.use_denoising = False
+scene.cycles.preview_denoiser = 'OPTIX'
+scene.cycles.preview_denoising_use_gpu = True
 scene.render.fps = 24
 scene.render.fps_base = 1.001
 scene.lock_frame_selection_to_range = False
@@ -51,13 +55,17 @@ def scene_state():
             bpy.data.colorspace.working_space,
             scene.camera.name if scene.camera else None,
             scene.world.name if scene.world else None,
-            scene.lock_frame_selection_to_range)
+            scene.lock_frame_selection_to_range,
+            scene.cycles.denoiser, scene.cycles.preview_denoiser,
+            scene.cycles.denoising_use_gpu, scene.cycles.preview_denoising_use_gpu,
+            scene.cycles.use_denoising, scene.cycles.use_preview_denoising)
 
 
 def finish(ok, error=None):
     RESULT.write_text(json.dumps({'ok': ok, 'step': state['step'], 'error': error,
                                  'blender': bpy.app.version_string,
                                  'checks': ['native_report_three_tabs', 'complete_setup', 'single_undo_redo',
+                                            'optix_gpu_defaults_and_undo',
                                             'working_space_undo', 'autopack_stays_enabled',
                                             'repeat_preserves_scene', 'report_reopen']},
                                 ensure_ascii=False), encoding='utf-8')

@@ -7,8 +7,7 @@ from mathutils import Matrix
 
 
 _DENOISE_FIELDS = (
-    'denoiser', 'denoising_input_passes', 'denoising_prefilter',
-    'denoising_quality', 'denoising_use_gpu',
+    'denoising_input_passes', 'denoising_prefilter', 'denoising_quality',
 )
 
 _REPORTS = {}
@@ -34,6 +33,9 @@ _SETTING_NAMES = {
     'use_preview_adaptive_sampling': ('Cycles', '视口自适应采样'),
     'preview_adaptive_threshold': ('Cycles', '视口 Noise Threshold'),
     'use_preview_denoising': ('Cycles', '视口去噪'),
+    'use_denoising': ('Cycles', '渲染去噪'),
+    'denoiser': ('Cycles', '渲染去噪算法'),
+    'denoising_use_gpu': ('Cycles', '渲染去噪使用 GPU'),
     'preview_denoiser': ('Cycles', '视口去噪算法'),
     'preview_denoising_input_passes': ('Cycles', '视口去噪通道'),
     'preview_denoising_prefilter': ('Cycles', '视口去噪预过滤'),
@@ -212,6 +214,12 @@ def render_settings_plan(scene):
         (cycles, 'use_preview_adaptive_sampling', True),
         (cycles, 'preview_adaptive_threshold', 0.02),
         (cycles, 'use_preview_denoising', True),
+        # 算法/GPU 是 setup 的明确目标，不能从 render 的旧默认值覆盖 viewport。
+        (cycles, 'use_denoising', True),
+        (cycles, 'denoiser', 'OPTIX'),
+        (cycles, 'preview_denoiser', 'OPTIX'),
+        (cycles, 'denoising_use_gpu', True),
+        (cycles, 'preview_denoising_use_gpu', True),
         (render, 'compositor_device', 'GPU'),
         (render, 'use_persistent_data', True),
         (scene.view_settings, 'view_transform', 'ACES 2.0'),

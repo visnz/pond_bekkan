@@ -2,7 +2,7 @@
 # 新操作脚本容器：「贴图强制压缩」（三步向导，见
 # core/analyzer/ops.py 的 ANALYZER_OT_downscale）；
 # Fab 节点导入、修复法线贴图色彩空间入口位于 shader_panel.py。
-# 双引擎 Cy 白膜适配：core/texture.py，共用一个白膜节点组。
+# 双引擎 Cy 白膜适配/取消入口位于 shader_panel.py。
 # 中心约束灯光：core/stage.py；隐形遮光板、探针、EV 吸光体及烘焙：core/light_probe.py。
 # 后续脚本以按钮追加。
 import bpy
@@ -25,7 +25,6 @@ class BEKKAN_PT_light_compose(bpy.types.Panel):
         col.operator('camera.create_volume_probe_visn', icon='LIGHTPROBE_VOLUME')
         col.operator('object.create_ev_absorber_visn', icon='CUBE')
         col.operator('object.bake_ev_absorbers_visn', icon='LIGHTPROBE_VOLUME')
-        col.operator('material.cycles_clay_visn', icon='NODE_MATERIAL')
         col.operator('material.base_color_direct_visn', icon='NODE_MATERIAL')
         col.operator("analyzer.downscale_textures_visn",
                         text="贴图强制压缩", icon="IMAGE")

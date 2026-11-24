@@ -16,6 +16,15 @@ def assert_settings(scene, engine):
     for owner, field, target in setup.render_settings_plan(scene):
         assert setup._same_value(getattr(owner, field), target, field), field
     assert bpy.data.colorspace.working_space == 'ACEScg'
+    assert_denoising(scene)
+
+
+def assert_denoising(scene):
+    cycles = scene.cycles
+    assert cycles.device == 'GPU'
+    assert cycles.use_denoising and cycles.use_preview_denoising
+    assert cycles.denoiser == cycles.preview_denoiser == 'OPTIX'
+    assert cycles.denoising_use_gpu and cycles.preview_denoising_use_gpu
 
 
 def assert_bootstrap(scene):
@@ -95,7 +104,7 @@ def test_repeat_and_exact_report(scene):
     sun.data.energy = 3.75
     camera.data.dof.aperture_fstop = 9
     report = setup.setup_workspace(bpy.context)
-    assert not report['changed'] and len(report['unchanged']) == 29
+    assert not report['changed'] and len(report['unchanged']) == 32
     assert all(a['status'] == 'PRESERVED' for a in report['scene_actions'])
     assert (set(scene.objects), scene.camera, scene.world) == (objects, camera, world)
     assert sun.data.energy == 3.75 and camera.data.dof.aperture_fstop == 9
@@ -202,6 +211,16 @@ def test_rollback():
     model = mesh_object(scene)
     scene.render.fps = 12
     scene.lock_frame_selection_to_range = False
+    cycles = scene.cycles
+    cycles.denoiser = 'OPENIMAGEDENOISE'
+    cycles.denoising_use_gpu = False
+    cycles.use_denoising = False
+    cycles.preview_denoiser = 'OPTIX'
+    cycles.preview_denoising_use_gpu = True
+    cycles.use_preview_denoising = False
+    denoise_fields = ('denoiser', 'denoising_use_gpu', 'use_denoising',
+                      'preview_denoiser', 'preview_denoising_use_gpu', 'use_preview_denoising')
+    denoise_before = {field: getattr(cycles, field) for field in denoise_fields}
     objects = set(scene.objects)
     count = tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
                                    bpy.data.lights, bpy.data.collections))
@@ -220,8 +239,41 @@ def test_rollback():
     assert set(scene.objects) == objects and model in list(scene.objects)
     assert scene.render.fps == 12 and scene.camera is None and scene.world is None
     assert not scene.lock_frame_selection_to_range
+    assert {field: getattr(cycles, field) for field in denoise_fields} == denoise_before
     assert tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
                                   bpy.data.lights, bpy.data.collections)) == count
+
+
+def test_optix_gpu_defaults():
+    scene = new_scene('Denoising regression')
+    mesh_object(scene)
+    setup.setup_workspace(bpy.context)
+    cycles = scene.cycles
+    # 复现旧 render 默认值覆盖已经设好 OptiX/GPU 的 viewport。
+    cycles.denoiser = 'OPENIMAGEDENOISE'
+    cycles.denoising_use_gpu = False
+    cycles.use_denoising = False
+    cycles.preview_denoiser = 'OPTIX'
+    cycles.preview_denoising_use_gpu = True
+    cycles.denoising_input_passes = 'RGB_ALBEDO_NORMAL'
+    cycles.denoising_prefilter = 'ACCURATE'
+    cycles.denoising_quality = 'HIGH'
+    cycles.preview_denoising_input_passes = 'RGB'
+    cycles.preview_denoising_prefilter = 'FAST'
+    cycles.preview_denoising_quality = 'FAST'
+    engine = scene.render.engine = 'CYCLES'
+    report = setup.setup_workspace(bpy.context)
+    assert_settings(scene, engine)
+    assert cycles.preview_denoising_input_passes == 'RGB_ALBEDO_NORMAL'
+    assert cycles.preview_denoising_prefilter == 'ACCURATE'
+    assert cycles.preview_denoising_quality == cycles.denoising_quality == 'HIGH'
+    changed = {e['label']: e for e in report['changed']}
+    assert (changed['渲染去噪算法']['old'], changed['渲染去噪算法']['new']) == ('OpenImageDenoise', 'OptiX')
+    assert (changed['渲染去噪使用 GPU']['old'], changed['渲染去噪使用 GPU']['new']) == ('关闭', '开启')
+    unchanged = {e['label']: e for e in report['unchanged']}
+    assert unchanged['视口去噪算法']['new'] == 'OptiX'
+    assert unchanged['视口去噪使用 GPU']['new'] == '开启'
+    assert not setup.setup_workspace(bpy.context)['changed']
 
 
 def run():
@@ -240,6 +292,8 @@ def run():
             print('PASS missing_assets_and_world_connections')
             test_rollback()
             print('PASS rollback')
+            test_optix_gpu_defaults()
+            print('PASS optix_gpu_defaults_and_report')
         print('PASS_WORKSPACE_SETUP', bpy.app.version_string)
     finally:
         addon.unregister()

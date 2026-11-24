@@ -98,12 +98,80 @@ class INDEX_OT_select_objects_with_texture(Operator):
         return {'FINISHED'}
 
 
+def _clay_group_users(group):
+    owners = set(bpy.data.all_ids)
+    owners.update(getattr(owner, 'node_tree', None) for owner in tuple(owners))
+    return [node for owner in owners if isinstance(owner, bpy.types.NodeTree) and owner.is_editable
+            for node in owner.nodes if node.type == 'GROUP' and node.node_tree == group]
+
+
+def _extend_cycles_clay_group(group):
+    """原位补齐旧共享组；保留 BSDF 接口标识、用户连线及已修改的颜色。"""
+    if group.get('bekkan_cycles_clay_version', 1) >= 2:
+        return False
+    outputs = [node for node in group.nodes if node.type == 'GROUP_OUTPUT' and node.is_active_output]
+    if not outputs:
+        return False
+    output = outputs[0]
+    bsdf = output.inputs.get('BSDF')
+    if not bsdf or len(bsdf.links) != 1:
+        return False
+    diffuse = bsdf.links[0].from_node
+    if diffuse.bl_idname != 'ShaderNodeBsdfDiffuse':
+        return False
+    users = _clay_group_users(group)
+    inputs = next((node for node in group.nodes if node.type == 'GROUP_INPUT'), None)
+    if inputs is None:
+        inputs = group.nodes.new('NodeGroupInput')
+        inputs.location = (diffuse.location.x - 260, diffuse.location.y)
+
+    def interface_socket(name, direction, socket_type):
+        socket = next((item for item in group.interface.items_tree
+                       if item.item_type == 'SOCKET' and item.in_out == direction
+                       and item.name == name and item.socket_type == socket_type), None)
+        if socket is not None:
+            return socket, False
+        return group.interface.new_socket(name=name, in_out=direction, socket_type=socket_type), True
+
+    normal, new_normal = interface_socket('Normal', 'INPUT', 'NodeSocketVector')
+    if new_normal:
+        normal.from_socket(diffuse, diffuse.inputs['Normal'])
+        normal.hide_value = True
+    if not diffuse.inputs['Normal'].is_linked:
+        group.links.new(inputs.outputs[normal.identifier], diffuse.inputs['Normal'])
+
+    value, new_value = interface_socket('Value', 'INPUT', 'NodeSocketFloat')
+    color = diffuse.inputs['Color']
+    gray = (not color.is_linked and 0 <= color.default_value[0] <= 1
+            and max(color.default_value[:3]) - min(color.default_value[:3]) < 1e-6
+            and abs(color.default_value[3] - 1.0) < 1e-6)
+    if new_value:
+        value.min_value, value.max_value = 0.0, 1.0
+        # 新组默认 0.8；旧组的自定义灰度保留，避免把已调好的共享白膜重置。
+        value.default_value = color.default_value[0] if gray else 0.8
+        value.description = 'Diffuse BSDF 灰度（0–1）'
+        for node in users:
+            node.inputs[value.identifier].default_value = value.default_value
+    if gray:
+        group.links.new(inputs.outputs[value.identifier], color)
+
+    transparent_socket, new_transparent = interface_socket('Transparent BSDF', 'OUTPUT', 'NodeSocketShader')
+    if new_transparent or not output.inputs[transparent_socket.identifier].is_linked:
+        transparent = group.nodes.new('ShaderNodeBsdfTransparent')
+        transparent.inputs['Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+        transparent.location = (diffuse.location.x, diffuse.location.y - 300)
+        group.links.new(transparent.outputs['BSDF'], output.inputs[transparent_socket.identifier])
+    group['bekkan_cycles_clay_version'] = 2
+    return True
+
+
 def _cycles_clay_group():
     for group in bpy.data.node_groups:
         if (group.bl_idname == 'ShaderNodeTree' and group.library is None
                 and group.get('bekkan_cycles_clay') == 1
                 and any(s.in_out == 'OUTPUT' and s.socket_type == 'NodeSocketShader'
                         for s in group.interface.items_tree if s.item_type == 'SOCKET')):
+            _extend_cycles_clay_group(group)
             return group
     group = bpy.data.node_groups.new('Cy白膜适配', 'ShaderNodeTree')
     group['bekkan_cycles_clay'] = 1
@@ -112,6 +180,7 @@ def _cycles_clay_group():
     output = group.nodes.new('NodeGroupOutput')
     output.location = (240, 0)
     group.links.new(shader.outputs['BSDF'], output.inputs['BSDF'])
+    _extend_cycles_clay_group(group)
     return group
 
 
@@ -122,7 +191,9 @@ def _is_default_cycles_clay(output):
     if any(s.is_linked for s in output.inputs if s != surface):
         return False
     shader = surface.links[0].from_node
+    instance = None
     if shader.type == 'GROUP' and shader.node_tree:
+        instance = shader
         group_outputs = [n for n in shader.node_tree.nodes
                          if n.type == 'GROUP_OUTPUT' and n.is_active_output]
         if not group_outputs:
@@ -131,27 +202,67 @@ def _is_default_cycles_clay(output):
         if socket is None or len(socket.links) != 1:
             return False
         shader = socket.links[0].from_node
-    if shader.bl_idname != 'ShaderNodeBsdfDiffuse' or any(s.is_linked for s in shader.inputs):
+    if shader.bl_idname != 'ShaderNodeBsdfDiffuse':
         return False
     color = shader.inputs.get('Color')
     roughness = shader.inputs.get('Roughness')
     weight = shader.inputs.get('Weight')
     normal = shader.inputs.get('Normal')
-    return (color is not None and all(abs(a - b) < 1e-6 for a, b in zip(color.default_value, (0.8, 0.8, 0.8, 1.0)))
+    if any(s.is_linked for s in shader.inputs if s not in (color, normal)):
+        return False
+
+    def exposed_input(socket):
+        if instance is None or len(socket.links) != 1 or socket.links[0].from_node.type != 'GROUP_INPUT':
+            return None
+        identifier = socket.links[0].from_socket.identifier
+        return next((s for s in instance.inputs if s.identifier == identifier and not s.is_linked), None)
+
+    color_value = color.default_value if color is not None and not color.is_linked else None
+    if color is not None and color.is_linked:
+        exposed = exposed_input(color)
+        if exposed is not None:
+            color_value = exposed.default_value
+            if isinstance(color_value, (float, int)):
+                color_value = (color_value, color_value, color_value, 1.0)
+    normal_default = normal is None or (not normal.is_linked and all(abs(v) < 1e-6 for v in normal.default_value))
+    if normal is not None and normal.is_linked:
+        exposed = exposed_input(normal)
+        if exposed is not None:
+            interface = next((s for s in instance.node_tree.interface.items_tree
+                              if s.item_type == 'SOCKET' and s.identifier == exposed.identifier), None)
+            normal_default = (getattr(interface, 'hide_value', False)
+                              and all(abs(v) < 1e-6 for v in exposed.default_value))
+    return (color_value is not None and len(color_value) == 4
+            and all(abs(a - b) < 1e-6 for a, b in zip(color_value, (0.8, 0.8, 0.8, 1.0)))
             and roughness is not None and abs(roughness.default_value) < 1e-6
             and (weight is None or abs(weight.default_value - 1.0) < 1e-6)
-            and (normal is None or all(abs(v) < 1e-6 for v in normal.default_value)))
+            and normal_default)
+
+
+def _restore_cancelled_cycles_outputs(outputs):
+    for output in outputs:
+        if output.get('bekkan_cancelled_cycles_output'):
+            # 用户取消后手动接线/改归属的输出不再当成空白膜输出。
+            if output.target == 'ALL' and not any(socket.is_linked for socket in output.inputs):
+                output.target = 'CYCLES'
+            del output['bekkan_cancelled_cycles_output']
 
 
 def adapt_cycles_clay(materials):
     """返回（适配后默认白膜材质数、本次补齐材质数、非默认材质数、跳过数）。"""
     default = added = custom = skipped = 0
+    # 仅在用户执行适配时升级，注册/热重载阶段不访问工程数据。
+    for group in bpy.data.node_groups:
+        if (group.bl_idname == 'ShaderNodeTree' and group.is_editable
+                and group.get('bekkan_cycles_clay') == 1):
+            _extend_cycles_clay_group(group)
     for mat in materials:
         tree = mat.node_tree
         if not tree or not mat.is_editable or not tree.is_editable:
             skipped += 1
             continue
         outputs = [n for n in tree.nodes if n.type == 'OUTPUT_MATERIAL']
+        _restore_cancelled_cycles_outputs(outputs)
         if not any(n.target in {'ALL', 'EEVEE'} for n in outputs):
             skipped += 1
             continue
@@ -183,15 +294,125 @@ def adapt_cycles_clay(materials):
     return default, added, custom, skipped
 
 
+def _is_default_cycles_world(output):
+    surface = output.inputs.get('Surface')
+    if not surface or len(surface.links) != 1 or any(s.is_linked for s in output.inputs if s != surface):
+        return False
+    background = surface.links[0].from_node
+    if background.bl_idname != 'ShaderNodeBackground' or any(s.is_linked for s in background.inputs):
+        return False
+    color = background.inputs.get('Color')
+    strength = background.inputs.get('Strength')
+    weight = background.inputs.get('Weight')
+    return (color is not None and all(abs(a-b) < 1e-6 for a, b in zip(color.default_value, (0.8, 0.8, 0.8, 1)))
+            and strength is not None and abs(strength.default_value - 1) < 1e-6
+            and (weight is None or abs(weight.default_value - 1) < 1e-6))
+
+
+def adapt_cycles_worlds(worlds):
+    """World 保留 EEVEE 天空，为空 Cycles 输出补灰度 0.8 / 强度 1 的 Background。"""
+    default = added = custom = skipped = 0
+    for world in worlds:
+        tree = world.node_tree
+        if not tree or not world.is_editable or not tree.is_editable:
+            skipped += 1
+            continue
+        outputs = [node for node in tree.nodes if node.type == 'OUTPUT_WORLD']
+        _restore_cancelled_cycles_outputs(outputs)
+        if not any(node.target in {'ALL', 'EEVEE'} for node in outputs):
+            skipped += 1
+            continue
+        cycles = [node for node in outputs if node.target == 'CYCLES']
+        for output in outputs:
+            if output.target == 'ALL':
+                output.target = 'EEVEE'
+        if not cycles:
+            output = tree.nodes.new('ShaderNodeOutputWorld')
+            output.target = 'CYCLES'
+            output.location = (outputs[0].location.x, outputs[0].location.y - 300)
+            cycles = [output]
+        changed = False
+        for output in cycles:
+            if any(socket.is_linked for socket in output.inputs):
+                continue
+            background = tree.nodes.new('ShaderNodeBackground')
+            background.label = 'Cy 世界白膜 · 灰度 0.8 / 强度 1'
+            background.inputs['Color'].default_value = (0.8, 0.8, 0.8, 1)
+            background.inputs['Strength'].default_value = 1
+            background.location = (output.location.x - 260, output.location.y)
+            tree.links.new(background.outputs['Background'], output.inputs['Surface'])
+            changed = True
+        added += int(changed)
+        if all(_is_default_cycles_world(output) for output in cycles):
+            default += 1
+        else:
+            custom += 1
+    return default, added, custom, skipped
+
+
 class MATERIAL_OT_cycles_clay(Operator):
     bl_idname = 'material.cycles_clay_visn'
     bl_label = '双引擎Cy白膜适配'
-    bl_description = '将 All 输出改为 EEVEE，并为未连接的 Cycles 输出补齐共享白膜节点组；编辑组内材质可统一修改，已有连接与仅 Cycles 的材质保持原样'
+    bl_description = '物体白膜：Normal、0–1 灰度与纯白透明输出；World：灰度0.8/强度1的Background；保留EEVEE材质及已有Cycles输出连线'
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         default, added, custom, skipped = adapt_cycles_clay(bpy.data.materials)
-        self.report({'INFO'}, f'白膜适配 {default} 个材质；本次添加 {added} 个；非默认白膜 {custom} 个；跳过 {skipped} 个')
+        world_default, world_added, world_custom, world_skipped = adapt_cycles_worlds(bpy.data.worlds)
+        self.report({'INFO'}, f'材质：白膜 {default}，新增 {added}，自定义 {custom}，跳过 {skipped}；'
+                    f'World：白膜 {world_default}，新增 {world_added}，自定义 {world_custom}，跳过 {world_skipped}')
+        return {'FINISHED'}
+
+
+def cancel_cycles_clay(owners, output_type):
+    """返回（修改的数据块数、断开的连接数、改为 All 的输出数、跳过数）。"""
+    changed = disconnected = restored = skipped = 0
+    for owner in owners:
+        tree = getattr(owner, 'node_tree', None)
+        if not tree or not owner.is_editable or not tree.is_editable:
+            skipped += 1
+            continue
+        outputs = [node for node in tree.nodes if node.type == output_type]
+        if not outputs:
+            skipped += 1
+            continue
+        cycles = [node for node in outputs if getattr(node, 'target', None) == 'CYCLES']
+        eevee = [node for node in outputs if getattr(node, 'target', None) == 'EEVEE']
+        # 多个输出时保留原 EEVEE 的实际选择，不由遍历顺序决定最后使用哪个。
+        preferred = next((node for node in eevee if node.is_active_output), None)
+        if preferred is None and eevee:
+            preferred = eevee[0]
+        touched = bool(eevee)
+        for output in cycles:
+            links = [link for socket in output.inputs for link in socket.links]
+            touched |= bool(links) or output.is_active_output
+            for link in links:
+                tree.links.remove(link)
+            disconnected += len(links)
+            # 只关 is_active_output 仍会被专属 target 优先选中；转成非活跃 All 才能回退。
+            output['bekkan_cancelled_cycles_output'] = True
+            output.target = 'ALL'
+            output.is_active_output = False
+        for output in eevee:
+            output.target = 'ALL'
+        restored += len(eevee)
+        if preferred is not None:
+            preferred.is_active_output = True
+        changed += int(touched)
+    return changed, disconnected, restored, skipped
+
+
+class MATERIAL_OT_cancel_cycles_clay(Operator):
+    bl_idname = 'material.cancel_cycles_clay_visn'
+    bl_label = '取消白膜适配'
+    bl_description = '断开全部材质与World的Cycles专属输出，停用空输出并把EEVEE改回All；保留节点，支持撤销'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        changed, links, outputs, skipped = cancel_cycles_clay(bpy.data.materials, 'OUTPUT_MATERIAL')
+        world_changed, world_links, world_outputs, world_skipped = cancel_cycles_clay(bpy.data.worlds, 'OUTPUT_WORLD')
+        self.report({'INFO'}, f'材质：取消 {changed}，断线 {links}，恢复 All {outputs}，跳过 {skipped}；'
+                    f'World：取消 {world_changed}，断线 {world_links}，恢复 All {world_outputs}，跳过 {world_skipped}')
         return {'FINISHED'}
 
 
@@ -285,6 +506,7 @@ class MATERIAL_OT_base_color_direct(Operator):
 
 _classes = (
     MATERIAL_OT_base_color_direct,
+    MATERIAL_OT_cancel_cycles_clay,
     MATERIAL_OT_cycles_clay,
     TextureSearchProperties,
     INDEX_OT_build_texture_index,
