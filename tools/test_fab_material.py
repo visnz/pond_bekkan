@@ -237,7 +237,8 @@ with bpy.context.temp_override(area=area, region=next(r for r in area.regions if
     assert shader_panel.BEKKAN_PT_shader_scripts.poll(bpy.context)
     layout = LayoutRecorder()
     shader_panel.BEKKAN_PT_shader_scripts.draw(SimpleNamespace(layout=layout), bpy.context)
-    assert layout.ops == ['material.cycles_clay_visn', 'material.cancel_cycles_clay_visn']
+    assert layout.ops == ['material.cycles_clay_visn', 'material.cancel_cycles_clay_visn',
+                          'wm.sky_angles_to_sun_coords_visn', 'wm.sun_coords_to_sky_angles_visn']
     space.shader_type = 'OBJECT'
 
 ui.apply_mode('BEKKAN')

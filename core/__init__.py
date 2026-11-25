@@ -6,7 +6,7 @@ from . import (snapshot, hierarchy, stage, anime, breath, skirt_autosway, render
                palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
                renderlayers, analyzer, outline, debug, light_probe, unselectable, shader_tools,
                workspace_setup, autoblend, fab_material, visibility_audit,
-               file_size_audit, geometry_tools, fotosketcher)
+               file_size_audit, geometry_tools, fotosketcher, world_sun_calc)
 
 _MODULES = (
     snapshot, hierarchy, stage, anime, breath, skirt_autosway, render_preset, texture,
@@ -14,7 +14,7 @@ _MODULES = (
     palette, trace2solid, sixproj, lightdesk, bakemap, splitter,
     renderlayers, analyzer, outline, debug, light_probe, unselectable, shader_tools,
     workspace_setup, autoblend, fab_material, visibility_audit, file_size_audit,
-    geometry_tools, fotosketcher,
+    geometry_tools, fotosketcher, world_sun_calc,
 )
 
 

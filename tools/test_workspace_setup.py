@@ -1,6 +1,7 @@
 """隔离 Blender 场景保护与 setup 报告回归，勿在用户工程中运行。"""
 import importlib
 import json
+import math
 from pathlib import Path
 import sys
 import bpy
@@ -41,7 +42,28 @@ def assert_bootstrap(scene):
     human = next(o for o in scene.objects if o.type == 'ARMATURE')
     assert len(human.data.bones) == 159 and tuple(human.location) == (0, 0, 0)
     assert any(b.rigify_type for b in human.pose.bones)
-    assert setup._has_sky(scene.world)
+    assert_sky_setup(scene.world)
+
+
+def assert_sky_setup(world, connected=True):
+    tree = world.node_tree
+    sky = next(n for n in tree.nodes if n.type == 'TEX_SKY')
+    assert sky.sky_type == 'MULTIPLE_SCATTERING' and sky.sun_disc
+    for field, value in (('sun_size', math.radians(77.9)), ('sun_intensity', 1),
+                         ('sun_elevation', math.radians(0.7)), ('sun_rotation', math.radians(60)),
+                         ('altitude', 100), ('air_density', 3), ('aerosol_density', 1), ('ozone_density', 1)):
+        assert math.isclose(getattr(sky, field), value, rel_tol=1e-6), field
+    mix = next(n for n in tree.nodes if n.type == 'MIX_SHADER'
+               and n.inputs[0].is_linked and n.inputs[0].links[0].from_node.type == 'LIGHT_PATH')
+    assert mix.inputs[0].links[0].from_socket.name == 'Is Camera Ray'
+    for socket, strength, frame in ((mix.inputs[1], 3, 'pow'), (mix.inputs[2], 0.1, 'vib')):
+        bg = socket.links[0].from_node
+        assert bg.type == 'BACKGROUND'
+        assert math.isclose(bg.inputs['Strength'].default_value, strength, rel_tol=1e-6)
+        assert bg.inputs['Color'].links[0].from_node == sky
+        assert bg.parent.type == 'FRAME' and bg.parent.label == frame
+    outputs = [link.to_node for link in mix.outputs[0].links if link.to_node.type == 'OUTPUT_WORLD']
+    assert bool(outputs) == connected
 
 
 def world_signature(world):
@@ -133,6 +155,14 @@ def test_empty_and_preserve_existing():
     report = setup.setup_workspace(bpy.context)
     assert report['mode'] == '空场景'
     assert_bootstrap(scene)
+    # 重复执行仍保留用户调整过的双背景强度与整个图结构。
+    signature = world_signature(scene.world)
+    camera_bg = next(n for n in scene.world.node_tree.nodes
+                     if n.type == 'BACKGROUND' and n.parent.label == 'vib')
+    camera_bg.inputs['Strength'].default_value = 0.25
+    setup.setup_workspace(bpy.context)
+    assert world_signature(scene.world) == signature
+    assert math.isclose(camera_bg.inputs['Strength'].default_value, 0.25)
     scene = new_scene('Existing complete')
     model = mesh_object(scene)
     camera = bpy.data.objects.new('Artist camera', bpy.data.cameras.new('Artist camera'))
@@ -187,6 +217,7 @@ def test_missing_assets_and_world_preservation():
     copied_background = scene.world.node_tree.nodes[background.name]
     assert copied_background.inputs['Color'].links[0].from_node.type == 'RGB'
     assert setup._has_sky(scene.world)
+    assert_sky_setup(scene.world, connected=False)
     assert any('未自动覆盖' in a['detail'] for a in report['scene_actions'])
     objects = set(scene.objects)
     assert not setup.setup_workspace(bpy.context)['changed']
@@ -223,9 +254,10 @@ def test_rollback():
     denoise_before = {field: getattr(cycles, field) for field in denoise_fields}
     objects = set(scene.objects)
     count = tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
-                                   bpy.data.lights, bpy.data.collections))
+                                   bpy.data.lights, bpy.data.collections, bpy.data.worlds))
     original = setup.create_sky_world
     def fail_world(*args):
+        original(*args)
         raise RuntimeError('Injected sky failure')
     setup.create_sky_world = fail_world
     try:
@@ -241,7 +273,7 @@ def test_rollback():
     assert not scene.lock_frame_selection_to_range
     assert {field: getattr(cycles, field) for field in denoise_fields} == denoise_before
     assert tuple(len(c) for c in (bpy.data.objects, bpy.data.meshes, bpy.data.cameras,
-                                  bpy.data.lights, bpy.data.collections)) == count
+                                  bpy.data.lights, bpy.data.collections, bpy.data.worlds)) == count
 
 
 def test_optix_gpu_defaults():

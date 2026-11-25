@@ -36,6 +36,9 @@ class BEKKAN_PT_shader_scripts(bpy.types.Panel):
         layout.operator('material.cycles_clay_visn', text='Cy白膜适配', icon='NODE_MATERIAL')
         layout.operator('material.cancel_cycles_clay_visn', text='取消白膜适配', icon='NODE_MATERIAL')
         if not material_mode:
+            layout.separator()
+            layout.operator('wm.sky_angles_to_sun_coords_visn', text='Sky → Sun 位置')
+            layout.operator('wm.sun_coords_to_sky_angles_visn', text='Sun 位置 → Sky')
             return
         layout.separator()
         status = status_for(context)

@@ -10,6 +10,7 @@
 # （合并自 Pond/hierarchy.py + Bekkan/STOOL_part/ParentsOps.py；
 #   面板在 ui/pond/panels/hierarchy.py 与 ui/bekkan/panels.py）
 import bpy
+from mathutils import Matrix
 
 
 # ── 共享助手（源自 Bekkan/ParentsOps.py，core/stage.py 也引用） ──
@@ -362,48 +363,145 @@ class P2E_individual(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _p2e_roots(objs):
+    """选中父子时只包裹最外层选中物体，保留其子树。"""
+    selected = set(objs)
+    roots = []
+    for obj in objs:
+        parent = obj.parent
+        while parent is not None and parent not in selected:
+            parent = parent.parent
+        if parent is None:
+            roots.append(obj)
+    return roots
+
+
+def _p2e_group_parent(roots, active):
+    parents = {obj.parent for obj in roots}
+    if len(parents) == 1:
+        return roots[0].parent
+    # 不同父级：取最外层原父级；不同根并列时优先活跃对象的分支。
+    candidates = []
+    preferred = None
+    active_chain = set()
+    current = active
+    while current is not None:
+        active_chain.add(current)
+        current = current.parent
+    for obj in roots:
+        parent = obj.parent
+        if parent is None:
+            continue
+        while parent.parent is not None:
+            parent = parent.parent
+        if parent not in candidates:
+            candidates.append(parent)
+        if obj in active_chain:
+            preferred = parent
+    return preferred or (candidates[0] if candidates else None)
+
+
+def _p2e_parent_transform(obj):
+    """保存父级的空间影响，避免重分解带旋转/非均匀缩放的物体世界矩阵。"""
+    if obj.parent is None:
+        return Matrix.Identity(4)
+    if obj.parent_type == 'OBJECT':
+        return obj.parent.matrix_world @ obj.matrix_parent_inverse
+    # 骨骼/顶点父级的有效矩阵由 Blender 已求得的世界矩阵反算。
+    return obj.matrix_world @ obj.matrix_basis.inverted()
+
+
 class P2E(bpy.types.Operator):
     bl_idname = "object.parent_to_empty_visn"
     bl_label = "所选物体 到上级"
-    bl_description = "所有所选物体到上级"
+    bl_description = "在所选原点的世界中心创建上级；同父级插入原父级下，不同父级取最外层（并列取活跃分支），保留世界变换和子树"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         objs = _checked_objs(self, context)
         if objs is None:
             return {'CANCELLED'}
+        objs = list(objs)
         act = context.view_layer.objects.active  # 最后选中的活跃对象
-        same_parent = all(o.parent == objs[0].parent for o in objs)
-
-        if len(objs) == 1:
-            bpy.ops.object.add(type='EMPTY', location=centro(objs),
-                               rotation=objs[0].rotation_euler)
-        else:
-            bpy.ops.object.add(type='EMPTY', location=centro(objs))
-        empty = context.object
-
-        # 把空物体和子对象都移到活跃对象所在集合
-        if act is not None:
-            cols = act.users_collection
-            try:
+        context.view_layer.update()
+        roots = _p2e_roots(objs)
+        parent = _p2e_group_parent(roots, act)
+        if any(not obj.is_editable for obj in objs):
+            self.report({'WARNING'}, '所选包含不可编辑物体，未创建上级')
+            return {'CANCELLED'}
+        try:
+            parent_inverse = parent.matrix_world.inverted() if parent else Matrix.Identity(4)
+            transforms = {obj: _p2e_parent_transform(obj) for obj in roots}
+        except ValueError:
+            self.report({'WARNING'}, '父级或物体矩阵不可逆，未创建上级')
+            return {'CANCELLED'}
+        center = centro_global(objs)
+        old_roots = {obj: (obj.parent, obj.parent_type, obj.parent_bone,
+                           obj.matrix_parent_inverse.copy()) for obj in roots}
+        old_collections = {obj: tuple(obj.users_collection) for obj in objs}
+        tracked = set(objs)
+        pending = list(roots)
+        while pending:
+            obj = pending.pop()
+            tracked.add(obj)
+            pending.extend(obj.children)
+        worlds = {obj: obj.matrix_world.copy() for obj in tracked}
+        cols = tuple(act.users_collection) if act else (context.collection,)
+        empty = None
+        try:
+            empty = bpy.data.objects.new('Empty', None)
+            empty.empty_display_type = 'PLAIN_AXES'
+            for col in cols:
+                col.objects.link(empty)
+            empty.parent = parent
+            empty.matrix_parent_inverse = parent_inverse
+            empty.location = center
+            if len(objs) == 1:
+                empty.rotation_euler = objs[0].rotation_euler
+            context.view_layer.update()
+            inverse = empty.matrix_world.inverted()
+            for obj in roots:
+                obj.parent = empty
+                obj.parent_type = 'OBJECT'
+                # 保留原局部通道，完整转移原父级影响（含父级逆矩阵/剪切）。
+                obj.matrix_parent_inverse = inverse @ transforms[obj]
+            # 保持既有集合规则：选中物体和新空物体放入活跃物体所在集合。
+            for obj in objs:
                 for col in cols:
-                    col.objects.link(empty)
-                context.collection.objects.unlink(empty)
-            except Exception:
-                pass
-            for o in objs:
-                for col in o.users_collection:
-                    col.objects.unlink(o)
-                for col in cols:
-                    col.objects.link(o)
-
-        if same_parent:
-            empty.parent = objs[0].parent
-
-        for o in objs:
-            o.select_set(True)
-            bpy.ops.object.parent_no_inverse_set(keep_transform=True)
-            o.select_set(False)
+                    if col not in obj.users_collection:
+                        col.objects.link(obj)
+                for col in tuple(obj.users_collection):
+                    if col not in cols:
+                        col.objects.unlink(obj)
+            context.view_layer.update()
+            matrices = [(empty.matrix_world, Matrix.Translation(center))] if len(objs) > 1 else []
+            matrices.extend((obj.matrix_world, previous) for obj, previous in worlds.items())
+            if any(abs(a-b) > max(1e-5, abs(b)*1e-5) for current, previous in matrices
+                   for row, old_row in zip(current, previous) for a, b in zip(row, old_row)):
+                raise RuntimeError('约束或驱动影响世界变换，已恢复原层级')
+        except Exception as error:
+            for obj, (old_parent, kind, bone, mpi) in old_roots.items():
+                obj.parent = old_parent
+                obj.parent_type = kind
+                obj.parent_bone = bone
+                obj.matrix_parent_inverse = mpi
+                # 局部通道从未主动改写；重写 basis 会重分解负缩放/增量变换。
+            for obj, previous in old_collections.items():
+                for col in previous:
+                    if col not in obj.users_collection:
+                        col.objects.link(obj)
+                for col in tuple(obj.users_collection):
+                    if col not in previous:
+                        col.objects.unlink(obj)
+            if empty is not None:
+                bpy.data.objects.remove(empty, do_unlink=True)
+            context.view_layer.update()
+            self.report({'WARNING'}, f'创建上级未完成：{error}')
+            return {'CANCELLED'}
+        for obj in objs:
+            obj.select_set(False)
+        empty.select_set(True)
+        context.view_layer.objects.active = empty
         return {'FINISHED'}
 
 

@@ -10,6 +10,14 @@ _DENOISE_FIELDS = (
     'denoising_input_passes', 'denoising_prefilter', 'denoising_quality',
 )
 
+_SKY_SETTINGS = (
+    ('sky_type', 'MULTIPLE_SCATTERING'), ('sun_disc', True),
+    ('sun_size', math.radians(77.9)), ('sun_intensity', 1.0),
+    ('sun_elevation', math.radians(0.7)), ('sun_rotation', math.radians(60)),
+    ('altitude', 100.0), ('air_density', 3.0),
+    ('aerosol_density', 1.0), ('ozone_density', 1.0),
+)
+
 _REPORTS = {}
 _DEFAULT_SHADER_VALUES = {
     'Base Color': (0.8, 0.8, 0.8, 1), 'Roughness': 0.5, 'IOR': 1.5, 'Alpha': 1,
@@ -245,28 +253,54 @@ def create_sky_world(source, report):
     world = source.copy() if source else bpy.data.worlds.new('Setup World')
     tree = world.node_tree
     sky = tree.nodes.new('ShaderNodeTexSky')
+    for field, value in _SKY_SETTINGS:
+        if not hasattr(sky, field):
+            raise RuntimeError(f'当前 Blender 不支持天空设置：{field}')
+        setattr(sky, field, value)
+    sky.location = (-840, 0)
+    sky.width = 220
     output = next((n for n in tree.nodes if n.type == 'OUTPUT_WORLD'
                    and getattr(n, 'is_active_output', False)), None)
     if output is None:
         output = next((n for n in tree.nodes if n.type == 'OUTPUT_WORLD'), None)
     if output is None:
         output = tree.nodes.new('ShaderNodeOutputWorld')
-        output.location = (40, 0)
+        output.location = (220, 60)
     background = next((link.from_node for link in output.inputs['Surface'].links
                        if link.from_node.type == 'BACKGROUND'), None)
-    if background is None:
-        background = next((n for n in tree.nodes if n.type == 'BACKGROUND'), None)
-    if background is None:
-        background = tree.nodes.new('ShaderNodeBackground')
-        background.location = (-200, 0)
-    sky.location = (background.location.x - 300, background.location.y)
-    if not background.inputs['Color'].is_linked:
-        tree.links.new(sky.outputs['Color'], background.inputs['Color'])
-        detail = '新增 Sky Texture 并连接到 Background；保留原节点和参数'
+    # 已接贴图、颜色或自定义着色器的世界保留输出；在副本中追加完整天空分支。
+    connect = (not output.inputs['Surface'].is_linked or
+               (background is not None and not any(socket.is_linked for socket in background.inputs)))
+    lighting = background if connect and background is not None else tree.nodes.new('ShaderNodeBackground')
+    visible = tree.nodes.new('ShaderNodeBackground')
+    for node, name, strength, position in (
+            (lighting, 'pow', 3.0, (-490, 30)), (visible, 'vib', 0.1, (-490, -200))):
+        frame = tree.nodes.new('NodeFrame')
+        frame.label = name
+        frame.location = position
+        node.parent = frame
+        node.location = (20, -40)
+        node.width = 190
+        node.inputs['Strength'].default_value = strength
+        tree.links.new(sky.outputs['Color'], node.inputs['Color'])
+
+    light_path = tree.nodes.new('ShaderNodeLightPath')
+    light_path.location = (-470, 230)
+    light_path.width = 190
+    for socket in light_path.outputs:
+        socket.hide = socket.name != 'Is Camera Ray'
+    mix = tree.nodes.new('ShaderNodeMixShader')
+    mix.location = (-140, 60)
+    mix.width = 190
+    tree.links.new(light_path.outputs['Is Camera Ray'], mix.inputs[0])
+    tree.links.new(lighting.outputs['Background'], mix.inputs[1])
+    tree.links.new(visible.outputs['Background'], mix.inputs[2])
+    detail = '新增双 Background 天空：pow 照明强度 3，vib 相机背景强度 0.1，Is Camera Ray 切换'
+    if connect:
+        output.location = (150, 60)
+        tree.links.new(mix.outputs[0], output.inputs['Surface'])
     else:
-        detail = '新增 Sky Texture；已有环境颜色连线保留，未自动覆盖'
-    if not output.inputs['Surface'].is_linked:
-        tree.links.new(background.outputs[0], output.inputs['Surface'])
+        detail += '；已有环境输出连线保留，未自动覆盖'
     _action(report, '天空', detail, 'ADDED')
     return world
 
